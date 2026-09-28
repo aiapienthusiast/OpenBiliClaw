@@ -1952,6 +1952,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "orcarouter": {"base_url": "https://api.orcarouter.ai/v1", "model": "openai/gpt-4o"},
     # Requesty: OpenAI-compatible LLM gateway.
     "requesty": {"base_url": "https://router.requesty.ai/v1", "model": "openai/gpt-4o-mini"},
+    "api_route": {"base_url": "https://global.api-route.com/v1", "model": "gpt-5.5"},
 }
 
 
@@ -1964,6 +1965,7 @@ _PROVIDER_HINTS: dict[str, str] = {
     "openrouter": "OpenRouter 聚合",
     "orcarouter": "OrcaRouter 聚合（OpenAI 兼容协议）",
     "requesty": "Requesty 聚合（OpenAI 兼容协议）",
+    "api_route": "API Route 聚合（OpenAI 兼容协议）",
 }
 
 
@@ -2004,6 +2006,7 @@ _PROVIDER_MODEL_HINT: dict[str, str] = {
         "默认 openai/gpt-4o-mini。Requesty 模型名格式: <vendor>/<model>,"
         "如 anthropic/claude-sonnet-4-5 / google/gemini-2.5-flash"
     ),
+    "api_route": "默认 gpt-5.5。也可填写 API Route 支持的其他模型 ID。",
     "ollama": (
         "常见模型: qwen2.5:7b (默认 / 中文好) / llama3.2 (Meta 新版) / "
         "gemma2 (Google) / mistral (轻量) / deepseek-r1 (开源推理)。"
@@ -2505,6 +2508,7 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "openrouter",
     "orcarouter",
     "requesty",
+    "api_route",
 )
 
 
@@ -2562,6 +2566,11 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
         "requesty",
         "Requesty 聚合",
         "默认 openai/gpt-4o-mini。一个 Key 跑多家模型,按调用计费",
+    ),
+    (
+        "api_route",
+        "API Route 聚合",
+        "默认 gpt-5.5。一个 Key 跑多家模型,按调用计费",
     ),
 )
 
@@ -2997,7 +3006,7 @@ def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool =
             .strip()
             .lower()
         )
-        if target not in _SUPPORTED_PROVIDERS or target in {"orcarouter", "requesty"}:
+        if target not in _SUPPORTED_PROVIDERS or target in {"orcarouter", "requesty", "api_route"}:
             console.print("[red]未知或没有 embedding 接口的 provider,跳过 embedding 配置。[/red]")
             return
         defaults = _PROVIDER_DEFAULTS.get(target, {})

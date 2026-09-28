@@ -2,6 +2,12 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 新增 API Route 内置 Provider（2026-09-28，feat/api-route-provider）
+
+- `provider_type="api_route"` 通过 OpenAI 兼容接口接入 API Route，默认 `https://global.api-route.com/v1`、`gpt-5.5`。支持独立实例、调用链、模型发现和请求探测；多模型路由不发送 `reasoning_effort`，embedding 仍需独立配置。
+- 接入后端配置与 API、CLI 和安装向导、桌面与扩展设置、首次设置向导；补充配置样例、文档和回归测试。只有用户显式配置时才会调用。
+- 用量估价按 API Route 当前公开费率计算默认 `gpt-5.5`，其他路由使用网关中档估算值。
+
 ## 修复：Windows pythonw 下子进程标准流缺失导致推荐页 502（2026-09-26，fix/pythonw-child-stdio）
 
 - **子进程 stdout/stderr 显式落盘（严重）**：Windows 桌面包用 `pythonw.exe`（无控制台）跑 `cli start`，`_run_api_server` 此前用 `subprocess.Popen([sys.executable, "-m", ...])` 拉起 4 个后台子进程但不传 stdout/stderr；Windows 上 Python 默认 `close_fds=True`，子 `pythonw` 的 `sys.stdout`/`sys.stderr` 为 `None`，`recommendation_server` 与 `image_service` 一写标准流就抛异常静默退出（stderr 同为 None，连堆栈都留不下），推荐页因此 502 空白。现统一走新辅助函数 `cli._spawn_background_child(name, module, env)`，把每个子进程的 stdout/stderr 重定向到 `logs/child-<name>.log`（append，utf-8）；这些文件落在 `logging_setup` 既有 unmanaged 清理策略内（超 200MB 截断、超 30 天删除、总预算 500MB）。回归：`tests/test_cli_child_stdio.py` 3 条（重定向参数与日志路径、命名、Popen 失败时句柄不泄漏）。

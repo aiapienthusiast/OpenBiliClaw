@@ -4,6 +4,8 @@
 
 `src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录配置、迁移、推荐和对话等公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。
 
+`GET /api/config` 和 `PUT /api/config` 的 LLM 配置支持 `api_route`，API Key 按既有凭据掩码及清除规则处理；`POST /api/config/discover-models` 可用 API Route 实例草稿查询其 OpenAI 兼容 `GET /models`。
+
 ## 推荐通知测试生命周期
 
 `POST /api/recommendations/append` 会在响应关键路径外安排推荐池状态通知。验证该通知的测试使用 `httpx.AsyncClient` + `ASGITransport`，让请求和有界异步等待共享 pytest 的事件循环；不得在请求级同步 `TestClient` portal 已关闭后用阻塞等待验证后台任务。追加推荐回归覆盖无延迟及 50ms 状态读取延迟，并保持完整响应与通知内容断言。生产接口、通知调度及应用启动流程不变。
