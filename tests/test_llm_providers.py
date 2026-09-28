@@ -13,6 +13,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from openbiliclaw.llm.api_route_provider import ApiRouteProvider
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
     LLMAuthError,
@@ -1417,6 +1418,41 @@ def test_requesty_provider_defaults() -> None:
     assert provider._extra_headers() == {}
     assert provider._extra_body(reasoning_effort="medium") == {}
     assert provider._openai_reasoning_effort("openai/gpt-4o-mini", "high") is None
+
+
+def test_api_route_provider_defaults() -> None:
+    provider = ApiRouteProvider(api_key="test-key")
+
+    assert provider.name == "api_route"
+    assert provider.base_url == "https://global.api-route.com/v1"
+    assert provider._model == "gpt-5.5"
+    assert provider.supports_embedding is False
+    assert provider._openai_reasoning_effort("gpt-5.5", "high") is None
+
+
+@pytest.mark.asyncio
+async def test_api_route_provider_uses_per_call_model_without_reasoning_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ApiRouteProvider(api_key="test-key")
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("api-route-ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+    response = await provider.complete(
+        [{"role": "user", "content": "hi"}],
+        model="claude-sonnet-4-6",
+        reasoning_effort="high",
+    )
+
+    assert response.content == "api-route-ok"
+    assert captured["model"] == "claude-sonnet-4-6"
+    assert "reasoning_effort" not in captured
+    assert "extra_body" not in captured
+    assert provider._model == "gpt-5.5"
 
 
 def test_requesty_provider_accepts_regional_base_url() -> None:

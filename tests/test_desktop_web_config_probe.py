@@ -117,3 +117,21 @@ def test_requesty_provider_exposed_across_web_surfaces() -> None:
     ) in desktop_js
     assert 'requesty: ["https://app.requesty.ai/api-keys", "Requesty"]' in setup_html
     assert 'requesty: "openai/gpt-4o-mini"' in setup_html
+
+
+def test_api_route_provider_exposed_across_web_surfaces() -> None:
+    desktop_html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    desktop_js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(
+        encoding="utf-8"
+    )
+    setup_html = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    popup_html = (ROOT / "extension/popup/popup.html").read_text(encoding="utf-8")
+    popup_js = (ROOT / "extension/popup/popup.js").read_text(encoding="utf-8")
+
+    for html in (desktop_html, setup_html, popup_html):
+        assert '<option value="api_route">API Route</option>' in html
+    for js in (desktop_js, popup_js):
+        assert 'api_route: "API Route"' in js
+        assert 'api_route: { model: "gpt-5.5", base_url: "https://global.api-route.com/v1" }' in js
+    assert 'api_route: ["https://global.api-route.com/", "API Route"]' in setup_html
+    assert 'api_route: "gpt-5.5"' in setup_html
