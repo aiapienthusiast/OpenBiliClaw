@@ -4,6 +4,7 @@
 
 - `provider_type="api_route"` 通过 OpenAI 兼容接口接入 API Route，默认 `https://global.api-route.com/v1`、`gpt-5.5`。支持独立实例、调用链、模型发现和请求探测；多模型路由不发送 `reasoning_effort`，embedding 仍需独立配置。
 - 接入后端配置与 API、CLI 和安装向导、桌面与扩展设置、首次设置向导；补充配置样例、文档和回归测试。只有用户显式配置时才会调用。
+- 用量估价按 API Route 当前公开费率计算默认 `gpt-5.5`，其他路由使用网关中档估算值。
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
