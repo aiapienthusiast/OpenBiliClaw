@@ -2570,7 +2570,7 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
     (
         "api_route",
         "API Route 聚合",
-        "默认 gpt-5.5。一个 Key 跑多家模型",
+        "默认 gpt-5.5。一个 Key 跑多家模型,按调用计费",
     ),
 )
 
