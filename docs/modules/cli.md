@@ -93,7 +93,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-v2ex-hot` | 只读验证 V2EX 热门 Topic | ✅ |
 | `discover-v2ex-latest` | 只读验证 V2EX 最新 Topic | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
-| `chat` | 苏格拉底式对话 | ✅ |
+| `chat` | 苏格拉底式对话；消息里粘贴的 B站/知乎/小红书等链接（含 b23.tv / xhslink.com 短链）会先被抓取摘要注入当轮上下文，并记为 `share` 正向偏好事件（issue #83，抓取失败静默降级不阻塞对话） | ✅ |
 | `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
 | `delight` | 手动查看当前惊喜推荐候选 | ✅ |
 | `probe` | 手动查看并确认猜测兴趣方向 | ✅ |
