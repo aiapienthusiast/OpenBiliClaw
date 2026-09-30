@@ -176,7 +176,14 @@ def test_pending_inbox_is_bounded_and_independently_scrollable(chromium_page: Pa
     assert panel["scrollHeight"] > panel["clientHeight"]
     chromium_page.locator("#desktopPendingConfirmations").hover()
     chromium_page.mouse.wheel(0, 500)
-    chromium_page.wait_for_timeout(80)
+    # 与 #chatLog 相同：滚轮滚动由合成器异步落地，固定等待会早采样，
+    # 必须等到 scrollTop 真正前进再断言。
+    chromium_page.wait_for_function(
+        "(threshold) => document.querySelector('#desktopPendingConfirmations')"
+        ".scrollTop > threshold",
+        arg=panel["scrollTop"],
+        timeout=5000,
+    )
     after = _scroll_report(chromium_page, "#desktopPendingConfirmations")
     assert after["scrollTop"] > panel["scrollTop"]
 
