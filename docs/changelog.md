@@ -2,6 +2,12 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：文案/评估协调器退避静默 + runtime-status 恒显 idle（2026-09-30，fix/expression-copy-backoff-observability）
+
+- **退避可观测（核心）**：真实环境 e2e 发现 discovery worker 里的 `ExpressionCopyCoordinator` 在 provider 429 后进入 15/30/60/120/300s transient backoff，期间**零日志**——表现为「19 条待写文案 10 分钟无进展、无任何日志」。现按 candidate_eval 的 worker failed 风格补齐状态迁移日志：transient 退避（WARNING 含退避时长/pending/streak/失败摘要）、no_provider/auth_failed 暂停、零进展 15s 重试、退避后恢复（INFO）、config_*/manual_*/startup 唤醒恢复（INFO）各一条，干净 drain 不刷日志。`CandidateEvalCoordinator` 同类静默分支一并补齐：rate-limit 退避（此前只有 transient 有日志）、no_provider/auth_failed 暂停、退避后 recovered、唤醒 resumed。回归：`tests/test_expression_copy_coordinator.py` +4 条（退避 WARNING 含时长/pending/原因、恢复 INFO、零进展 WARNING、干净 drain 无 WARNING、暂停/恢复日志）、`tests/test_candidate_eval_coordinator.py` +1 条。
+- **runtime-status 聚合 worker 协调器真实状态**：`openbiliclaw start` 的 delegated 部署中两个协调器跑在 discovery worker 进程，API 进程内实例从不启动，`/api/runtime-status` 的 `expression_*` / `candidate_eval_*` 恒显 idle。不新建 IPC：discovery worker 搭车既有 `WorkerStatusStore` 文件心跳机制，每 10s 原子发布 `runtime/discovery_worker_status.json`（`extra.coordinators` 嵌套两个协调器的 `status_payload()`）；`WorkerStatusStore` 新增 `read_if_fresh()`（心跳超 45s 视为缺失），`runtime_context` 向 controller 装配 `delegated_coordinator_status_reader`，`get_runtime_status()` 在本地合并之后用新鲜的 worker 载荷覆盖同名键，文件缺失/过期保持本地值（单进程 `serve-api` 语义不变）。回归：`tests/test_worker_status.py` +1 条（read_if_fresh 新鲜/过期/缺失）、`tests/test_discovery_worker_status.py` +3 条（载荷收集、失败/缺失跳过、心跳端到端写读）、`tests/test_refresh_runtime.py` +2 条（delegated 覆盖本地 idle、reader 返回 None 保持本地）。
+- **文档同步**：`docs/modules/runtime.md`（文案协调器退避日志、候选评估失败日志、delegated 状态聚合通道）。
+
 ## 修复：LLM length 自愈两缺口——工具调用路径 + Responses reasoning 标识（2026-09-30，fix/llm-tools-length-responses-reasoning）
 
 - **原生工具调用补齐 length 预算放大重试（缺口 1）**：`OpenAIProvider.complete_with_tools()` 此前在 reasoning 模型把输出预算烧光（空 `content`、无 `tool_calls`、`finish_reason=length`）时直接 raise，agent loop 硬失败，而普通 `complete()` 已有翻倍预算自愈。现复用共享 `_retry_with_larger_budget()`：该场景翻倍 `max_tokens` 重试一次（封顶 32768 语义一致、已达上限不重试、`tools` / `tool_choice` 及其余参数原样保留）；携带 tool_calls 的响应永不进入重试，重试仍失败时抛出与此前一致的 reasoning-budget 错误。Responses-flavor 无原生 FC，其 prompt 模拟工具调用走 `complete()`，已被 `e4fa214e` 的 flavor 修复覆盖，本次补服务级集成回归。回归：`tests/test_llm_native_tools.py` +4 条（放大重试成功且 tools 保留、耗尽后错误可被 `is_reasoning_budget_exhausted()` 识别、正常 tool_calls 路径零重试、responses-flavor 模拟工具调用经放大重试恢复）。
