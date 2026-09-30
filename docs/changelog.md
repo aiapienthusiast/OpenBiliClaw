@@ -2,6 +2,10 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：dialogue 布局 e2e 剩余滚轮固定等待收口（2026-09-30，fix/e2e-wheel-wait）
+
+- **`test_pending_inbox_is_bounded_and_independently_scrollable` 同款 flake 收口（纯测试）**：与 `fix/e2e-stability` 修过的 `test_many_dialogue_cards_keep_natural_height_and_scroll` 完全相同的模式——`mouse.wheel` 后固定 `wait_for_timeout(80)` 断言 `#desktopPendingConfirmations` 的 `scrollTop` 前进，headless Chromium 滚轮滚动由合成器异步落地，固定等待会早采样。同样改为 `wait_for_function` 轮询到 `scrollTop` 真正前进再断言；至此该文件内 wheel-scroll 断言的固定等待全部消除，连跑 5 遍全绿。
+
 ## 修复：桌面 web e2e 稳定性（2026-09-30，fix/e2e-stability）
 
 - **pool_refill 稳定性 e2e 按真实线上事件格式注入（测试过期，非产品 bug）**：`tests/test_desktop_web_list_stability_e2e.py::test_pool_refill_event_keeps_loaded_cards_and_scroll_position` 在干净 main 上稳定红，末条断言 `#metricPool == "70"` 不成立（实为 40）。根因：自 `408de9a8` 起头部库存只跟随带 `pool_status_version` 的已提交库存快照（`normalizeRuntimeStatus` 优先 `state.platformAvailability.total_available`，无版本事件的裸 `pool_available_count` 不再驱动头部），而测试注入的 `refresh.pool_updated` 缺 `pool_status_version` / `platform_available_counts`。产品行为正确（防 HTTP/WebSocket 竞态下旧快照覆盖新快照），故按真实后端 `_broadcast_recommendation_pool_status` 的线上格式补全注入字段，断言与 DOM 原地存活 / 滚动位置契约保持不变。
