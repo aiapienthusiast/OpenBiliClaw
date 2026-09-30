@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：数据目录过深时推荐子进程 AF_UNIX 路径超限崩溃（2026-09-30，fix/recommendation-socket-fallback）
+
+- **Unix socket 路径超限自动回退 TCP（现场故障）**：推荐子进程与主 API 之间的 Unix socket 路径由 `<data_dir>/runtime/recommendation.sock` 直接拼接，macOS 上 `sun_path` 上限约 104 字节，数据目录稍深子进程启动即以 `OSError: AF_UNIX path too long` 崩溃，API 侧随后报 `Recommendation proxy failed: All connection attempts failed`（生产日志 2026-09-28 出现 4 次）。现 `recommendation_runtime.ensure_recommendation_transport_env()` 在选 Unix socket 前对最终路径（含显式 `OPENBILICLAW_RECOMMENDATION_SOCK`）做字节长度检查，达到 104 字节（含 NUL，按最严 POSIX 平台计）即自动回退 loopback TCP（默认 `127.0.0.1:8423`）并记一条 WARNING（含实际路径长度与所选端口）；传输仍由父进程环境变量单一决定，子进程与 API 反代读同一组变量，双方始终一致。独立直接运行 `openbiliclaw.recommendation_server`（无继承环境变量）时同样的长度检查在进程内兜底，不再崩溃。Windows 行为不变（本就走 TCP）。回归：`tests/test_recommendation_runtime.py` +5 条（长度边界、超长派生路径回退 TCP 且 WARNING 含长度/上限/端口、超长显式 SOCK 回退、ensure 与 server 经共享 env 同选 TCP、server 独立运行超长路径兜底 TCP）。
+- **文档同步**：`docs/modules/cli.md`（start 四进程段落补传输选择与回退规则）、`docs/modules/api.md`（推荐反代小节补传输一致性说明）、`docs/architecture.md`（系统概览数据流标注回退）。
+
 ## 修复：failed_eval 死信无复活路径 + pool maintenance 不变量测量噪声自锁（2026-09-30，fix/pool-eval-recovery）
 
 - **failed_eval 死信复活（核心，现场故障）**：某 Windows 用户 7 月 deepseek 401/404 配置错误把 568 条候选的评估预算烧进 `failed_eval`，此后 provider 修好这批候选也没有任何回到 `pending_eval` 的路径，候选池只出不进。新增 `Database.revive_failed_eval_candidates(limit=500, max_revives=3)`（重置 status / `eval_attempts` / `batch_eval_attempts` / `eval_error` 与 claim 字段，`temporal_review_due:*` 行归 temporal 复审机制所有不参与）；`CandidateEvalCoordinator` 新增 `revive_failed_eval_callback`，在恢复信号（config rebuild 后的 `startup`、`config_*` / `manual_*` 唤醒，即解除 paused 的同一组 reason）触发一次复活，经 `DiscoveryCandidatePipeline.revive_failed_eval_candidates()` 委托到 storage。有界性两层保证：单次最多 `limit` 行 + 每候选持久化 `eval_revive_count` 终生最多复活 `max_revives` 次，对着仍然坏掉的 provider 反复重启不会无限重烧 LLM 配额。复活失败只记 WARNING，不影响唤醒路径。回归：`tests/test_failed_eval_revival.py` 11 条（状态/预算重置、单次限量、持久化复活上限、temporal 行跳过、coordinator 触发时机与异常隔离、pipeline 委托）。

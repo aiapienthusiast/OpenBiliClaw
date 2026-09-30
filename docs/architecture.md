@@ -6,6 +6,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
 recommendation request → main API → optional Unix-socket recommendation process
+                                  （socket 路径超过 AF_UNIX sun_path 上限时自动回退 loopback TCP）
                                   → current SQLite snapshot → full ranking worker
                                   → atomic history + shown COMMIT → cards + exact platform inventory
 main API ← validated response inventory / 2s active-client inventory watcher
