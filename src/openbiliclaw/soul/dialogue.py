@@ -282,6 +282,113 @@ class SocraticDialogue:
             self._queue_dialogue_learning(payload, binding=binding)
             return reply
 
+    async def respond_stream(
+        self,
+        user_message: str,
+        *,
+        scope: str = "chat",
+        turn_id: str = "",
+        session: str = "",
+        dialogue_binding: DialogueTurnBinding | Mapping[str, object] | None = None,
+        progress: Any = None,
+    ) -> AsyncIterator[str]:
+        """Streaming variant of :meth:`respond`, yielding reply text deltas.
+
+        Same history, learning and locking semantics as ``respond``: the
+        user turn is appended up front (rolled back on failure) and the
+        completed reply is recorded once the stream finishes. Tool-enabled
+        turns keep the one-shot tool flow and yield the final reply as a
+        single delta; plain turns stream token deltas live from the service.
+        """
+        if self._learning_mode is DialogueLearningMode.QUEUED and self._settlement_queue is None:
+            raise DialogueLearningConfigurationError(
+                "queued dialogue learning requires DialogueSettlementQueue"
+            )
+
+        binding: DialogueTurnBinding | None = None
+        if dialogue_binding is not None:
+            from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+            if isinstance(dialogue_binding, DialogueTurnBinding):
+                binding = dialogue_binding
+            elif isinstance(dialogue_binding, Mapping):
+                binding = DialogueTurnBinding.from_mapping(dialogue_binding)
+            else:
+                raise TypeError("dialogue_binding must be DialogueTurnBinding or a mapping")
+
+        async with self._respond_lock:
+            self._ensure_history_loaded()
+            history_length = len(self._history)
+            turn_timestamp = self._local_now().isoformat()
+            self._history.append(
+                DialogueTurn(role="user", content=user_message, timestamp=turn_timestamp)
+            )
+
+            try:
+                service = self._llm_service or self._build_service()
+                prompt_message = (
+                    binding.render_user_prompt(user_message)
+                    if binding is not None
+                    else user_message
+                )
+                prompt_user_message = self._user_prompt_with_current_time(prompt_message)
+
+                # If tools are configured, keep the one-shot tool-calling
+                # path: whether the reply is a tool_call payload is known
+                # only after the full text, so it cannot stream live.
+                if self._tools and self._tool_dispatcher:
+                    reply = await self._respond_with_tools(
+                        service, prompt_user_message, progress=progress
+                    )
+                    yield reply
+                else:
+                    reply_parts: list[str] = []
+                    response_content = ""
+                    stream_fn = getattr(service, "stream_socratic_dialogue", None)
+                    if callable(stream_fn):
+                        async for chunk in stream_fn(
+                            user_message=prompt_user_message,
+                            history=self._history_to_messages(),
+                            caller="soul.dialogue",
+                        ):
+                            if chunk.delta:
+                                reply_parts.append(chunk.delta)
+                                yield chunk.delta
+                            if chunk.response is not None:
+                                response_content = chunk.response.content
+                        reply = response_content or "".join(reply_parts)
+                    else:
+                        # Duck-typed doubles predating token streaming.
+                        response = await service.complete_socratic_dialogue(
+                            user_message=prompt_user_message,
+                            history=self._history_to_messages(),
+                            caller="soul.dialogue",
+                        )
+                        reply = response.content
+                        yield reply
+            except BaseException:
+                del self._history[history_length:]
+                logger.exception("Failed to generate Socratic dialogue response.")
+                raise
+
+            self._history.append(
+                DialogueTurn(
+                    role="agent",
+                    content=reply,
+                    timestamp=self._local_now().isoformat(),
+                )
+            )
+            payload: dict[str, object] = {
+                "user_message": user_message,
+                "assistant_reply": reply,
+                "session": session.strip() or self._session,
+                "scope": scope,
+                "turn_id": turn_id,
+            }
+            if binding is not None:
+                payload["dialogue_binding"] = binding.to_mapping()
+            self._queue_dialogue_learning(payload, binding=binding)
+
     def _queue_dialogue_learning(
         self,
         payload: dict[str, object],
@@ -376,6 +483,11 @@ class SocraticDialogue:
         M7: ``session`` / ``session_id`` / ``turn_id`` are forwarded as the
         loop's approval context so parked hard_write approvals can be traced
         back to the conversation that requested them.
+
+        Token streaming: when the loop's LLM service streams, ``delta``
+        events (incremental reply fragments) pass through between hops and
+        the ``final`` event; the recorded history reply still comes from
+        ``final`` only.
         """
         if self._learning_mode is DialogueLearningMode.QUEUED and self._settlement_queue is None:
             raise DialogueLearningConfigurationError(

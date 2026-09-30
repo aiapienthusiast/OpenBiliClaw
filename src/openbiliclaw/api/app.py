@@ -11377,8 +11377,9 @@ def create_app(
 
         When a ``turn_id`` is supplied, the client has already created a
         pending durable turn with ``streaming=True``; this endpoint completes
-        that turn while streaming deltas. Without a turn_id it falls back to a
-        non-persistent legacy response.
+        that turn while streaming real token deltas (``content`` events) via
+        ``SocraticDialogue.respond_stream``. Without a turn_id it falls back
+        to a non-persistent legacy response.
         """
         message = payload.message.strip()
         if not message:
@@ -11402,6 +11403,43 @@ def create_app(
                 )
             )
 
+        async def _respond_deltas(dialogue_owner: Any) -> AsyncIterator[str]:
+            """Yield real reply deltas via ``respond_stream``.
+
+            Dialogue owners without ``respond_stream`` (duck-typed doubles)
+            fall back to the one-shot ``respond`` and yield its reply once.
+            """
+            stream_fn = getattr(dialogue_owner, "respond_stream", None)
+            if not callable(stream_fn):
+                yield await _respond(dialogue_owner)
+                return
+            if turn is not None:
+                respond_kwargs: dict[str, object] = {
+                    "scope": turn.scope or "chat",
+                    "turn_id": turn.turn_id,
+                }
+                binding = _binding_from_turn(turn)
+                respond_parameters: Mapping[str, inspect.Parameter] = {}
+                try:
+                    respond_parameters = inspect.signature(stream_fn).parameters
+                except (TypeError, ValueError):
+                    respond_parameters = {}
+                if "session" in respond_parameters:
+                    respond_kwargs["session"] = turn.session
+                if binding is not None and "dialogue_binding" in respond_parameters:
+                    respond_kwargs["dialogue_binding"] = binding
+                if "progress" in respond_parameters:
+                    respond_kwargs["progress"] = _progress
+                iterator = stream_fn(_contextual_chat_message(turn), **respond_kwargs)
+            else:
+                iterator = stream_fn(message, progress=_progress)
+            while True:
+                try:
+                    delta = await asyncio.wait_for(iterator.__anext__(), timeout=120)
+                except StopAsyncIteration:
+                    break
+                yield str(delta)
+
         async def _event_stream() -> AsyncIterator[str]:
             import json as _json
 
@@ -11409,21 +11447,40 @@ def create_app(
                 return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
 
             yield sse("phase", {"phase": "thinking", "text": "正在思考…"})
+            reply_parts: list[str] = []
+            progress_index = 0
+
+            def _drain_progress() -> list[tuple[str, dict[str, object]]]:
+                nonlocal progress_index
+                pending = progress_events[progress_index:]
+                progress_index = len(progress_events)
+                return pending
+
+            failure: Exception | None = None
             try:
-                reply = await _run_with_dialogue_execution(_respond)
+                async with _dialogue_execution_lease() as current_dialogue:
+                    async for delta in _respond_deltas(current_dialogue):
+                        # Tool-phase progress events are produced between
+                        # deltas; flush them first so they never render
+                        # after the reply text they precede.
+                        for event, data in _drain_progress():
+                            yield sse(event, data)
+                        reply_parts.append(delta)
+                        yield sse("content", {"delta": delta})
             except Exception as exc:
                 logger.exception("Chat stream dialogue failed")
-                reply = safe_llm_failure_message(exc)
+                failure = exc
+
+            if failure is not None:
+                reply_parts = [safe_llm_failure_message(failure)]
+                yield sse("content", {"delta": reply_parts[0]})
+            reply = "".join(reply_parts)
 
             if turn is not None and turn_id:
                 _complete_chat_turn_row(turn_id, reply=reply)
 
-            for event, data in progress_events:
+            for event, data in _drain_progress():
                 yield sse(event, data)
-            await asyncio.sleep(0.15)
-            for i in range(0, len(reply), 18):
-                yield sse("content", {"delta": reply[i : i + 18]})
-                await asyncio.sleep(0.015)
             yield sse("done", {"reply": reply})
 
         return StreamingResponse(
@@ -11441,9 +11498,13 @@ def create_app(
 
         Runs ``AgentLoop`` under the app-wide dialogue execution lease and
         forwards every ``AgentEvent`` as one SSE event named by its type
-        (``thinking`` / ``tool_call`` / ``tool_result`` /
+        (``thinking`` / ``tool_call`` / ``tool_result`` / ``delta`` /
         ``step_limit_reached`` / ``final``), followed by a terminal ``done``
-        carrying the final reply. LLM failures map to a single ``error``
+        carrying the final reply. ``delta`` events carry incremental reply
+        fragments (``text``) for live rendering; they are never persisted
+        into ``payload.agent_events``, and older clients may safely ignore
+        them since ``thinking`` / ``final`` still carry the full text. LLM
+        failures map to a single ``error``
         event. Lease admission is bounded (30s): while a config hot reload
         holds the dialogue lane, the stream ends with one ``error`` event
         ("系统正在重载配置，请稍后再试") instead of hanging, and a durable
@@ -11537,7 +11598,12 @@ def create_app(
                         ),
                     ):
                         data = event.to_dict()
-                        loop_events.append(data)
+                        # ``delta`` fragments are live-render only: persisting
+                        # hundreds of them into payload.agent_events would
+                        # bloat the turn row, and replay reconstructs the text
+                        # from ``thinking`` / ``final``.
+                        if event.type != "delta":
+                            loop_events.append(data)
                         if event.type == "final":
                             final_reply = event.text
                         yield sse(event.type, data)
@@ -12236,7 +12302,10 @@ def create_app(
                 else ""
             ),
         ):
-            events.append(event.to_dict())
+            # Same rule as the interactive endpoint: delta fragments are
+            # live-render only and never persisted into agent_events.
+            if event.type != "delta":
+                events.append(event.to_dict())
             if event.type == "final":
                 reply = event.text
         if not reply.strip():

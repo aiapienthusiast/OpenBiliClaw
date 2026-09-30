@@ -27,6 +27,7 @@
 | API Route Provider 支持 | ✅ | `ApiRouteProvider` 使用 OpenAI 兼容协议，默认模型 `gpt-5.5`，默认端点 `https://global.api-route.com/v1`；沿用统一超时、重试、错误归一化、JSON mode、模型发现与 per-call model 覆盖。多模型网关不发送 `reasoning_effort`；embedding 需另配。仅在显式配置 API Key 和调用链时使用。 |
 | 2.2 Provider Registry | ✅ | 多端点实例注册 + 全局 / 模块有序链 + 实例级 cooldown + health check |
 | v0.3.x 原生 function calling（M1） | ✅ | `OpenAIProvider.complete_with_tools()` 走 OpenAI `tools=[{"type":"function",...}]` 原生 FC，支持单次响应多个 `tool_calls` 并行解析；`api_flavor="responses"` 实例与 Ollama 显式标 `supports_tool_calling=False`，由 service 层 prompt 模拟兜底；DeepSeek 继承原生 FC 并保留 thinking max_tokens 下限；`LLMRegistry.complete_with_tools*()` 复用 fallback 链 cooldown / 限流语义，链内跳过无 FC 能力的实例 |
+| token 级流式（issue #83） | ✅ | `LLMProvider.stream_complete()` / `stream_complete_with_tools()` 产出 `LLMStreamChunk`（`delta` 增量 + 终止块聚合 `LLMResponse`）；基类默认实现 = 调 `complete()` / `complete_with_tools()` 后一次性吐全文，所有现存 provider 零改动兼容。真流式只在 `OpenAIProvider`（chat-completions flavor，`stream=True` + `stream_options.include_usage`，tool_calls 增量静默聚合到终止块）实现，DeepSeek / Ollama / OpenRouter / OrcaRouter / Requesty / ApiRoute / openai_compatible 子类自动继承；responses flavor 与 `json_mode` 保持一次性回退（结构化调用依赖格式拒绝重试梯），Claude / Gemini / CodexChatGPT 走基类回退。`LLMRegistry.stream_*()` 镜像 six 个非流式入口（fallback 链 / 显式链 / 精确路由 × 普通 / FC），流式专属语义：**只在首个 delta 之前允许 fallback**，已吐字后失败直接上抛避免重复文本。`LLMService.stream_complete_with_core_memory()` / `stream_socratic_dialogue()` / `stream_complete_with_native_tools()` 复用同一套路由 / provider slot / 记账；prompt 模拟工具路由保持一次性（回复是否为 tool_call JSON 要等全文才知道） |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
 | 画像整理裁决 prompt | ✅ | `build_profile_consolidation_prompt()` 保持静态 system + 确定性 user JSON；likes 从“仅严格同义”调整为“是否重复占用同一推荐意图”，允许合并“搞笑 / 娱乐搞笑”这类无新增选择价值的同粒度标签，同时明确保留“篮球 / NBA”“AI技术 / AI视频技术”等会改变召回范围的父子兴趣。每个簇携带 `known_distinct_pairs`，模型不得重判或合并用户回滚 / 当前策略已确认分开的 pair；代码侧仍作相同约束的强校验。dislikes 继续只合并近乎同义项并严禁向上泛化 |
 | Phase 2 provider-independent cognition views | ✅ | Preference、plain Awareness、Awareness-with-confusions 与 Insight builder 都有显式 `input_view="legacy"|"compact-v1"` seam；compact 使用 `CognitionEventViewV1` 与 `CognitionProfileViewV1` 删除 transport/storage 重复字段并按 stable soul → stable preference → volatile cognition → current batch 排序，system message、输出 schema、reasoning 和 token ceiling 不变。生产 rollout 逐 task 控制：只默认开启已通过 SenseTime 门的 `soul.awareness_confusions`，plain `soul.awareness` 固定 legacy，Preference/Insight 默认 legacy。该投影不依赖 tokenizer、模型或 provider cache。 |
@@ -162,6 +163,23 @@ response = await provider.complete_with_tools(
 )
 print(response.tool_calls)
 print(provider.supports_tool_calling)  # False 时由 LLMService 走 prompt 模拟兜底
+
+# token 级流式（issue #83）：delta 增量实时吐出，终止块携带聚合 LLMResponse
+# （权威全文 / usage / tool_calls）。未覆写的 provider 走基类一次性回退。
+async for chunk in provider.stream_complete([{"role": "user", "content": "hello"}]):
+    if chunk.delta:
+        print(chunk.delta, end="")
+    if chunk.response is not None:
+        full_text = chunk.response.content
+
+# 原生 FC 流式：content delta 实时流出，tool_calls 增量在内部聚合、
+# 只随终止块出现（agent loop 据此判断该跳是答复还是工具调用）。
+async for chunk in provider.stream_complete_with_tools(messages, tools):
+    ...
+
+# registry 流式入口与非流式一一对应，fallback 只在首个 delta 之前发生：
+# registry.stream_complete / stream_chain / stream_provider /
+# stream_complete_with_tools / stream_with_tools_chain / stream_provider_with_tools
 
 provider = OpenRouterProvider(
     api_key="or-...",
@@ -326,6 +344,16 @@ response = await service.complete_with_native_tools(
     tools=tool_registry.llm_schemas(),
     caller="agent.loop",
 )
+
+# 流式变体（issue #83）：同路由、同 provider slot、同记账；
+# delta 增量实时吐出，终止块为聚合 LLMResponse。agent loop 用它产出 SSE
+# delta 事件；prompt 模拟路由保持一次性（单 delta + 终止块）。
+async for chunk in service.stream_complete_with_native_tools(
+    messages=messages, tools=tool_registry.llm_schemas(), caller="agent.loop",
+):
+    ...
+async for chunk in service.stream_socratic_dialogue(user_message="...", history=[...]):
+    ...
 
 from openbiliclaw.llm import is_llm_rate_limit_error
 

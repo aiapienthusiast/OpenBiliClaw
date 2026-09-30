@@ -8042,7 +8042,16 @@ ${cardFeedbackBarHtml()}`;
         data && typeof data === "object" && !Array.isArray(data)
           ? { ...data, type: data.type || name }
           : { type: name };
+      if (event.type === "delta") {
+        // Token 级增量：直接追加到实时回复气泡；thinking（中间跳）会清空它，
+        // final / done 用完整文本整体替换。过程模型不记录 delta，
+        // 避免历史回放重复拼接。
+        live.replyText = String(live.replyText || "") + String(data?.text || "");
+        renderChat({ forceBottom: true });
+        return;
+      }
       chatAgentCore.applyAgentEvent(live.process, event);
+      if (event.type === "thinking") live.replyText = "";
       if (event.type === "final") live.replyText = String(event.text || "");
       if (event.type === "error") live.finished = true;
       renderChat({ forceBottom: true });
