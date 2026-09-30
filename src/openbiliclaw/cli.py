@@ -1019,12 +1019,22 @@ def _build_recommendation_engine() -> Any:
 def _build_dialogue(soul_engine: Any) -> Any:
     """Build the Socratic dialogue helper for interactive chat."""
     from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
+    from openbiliclaw.sources.link_ingest import LinkIngestor
 
+    # Chat link ingestion (issue #83): same LinkIngestor as the Web chat lane —
+    # B站链接走 /view 元数据,其余平台抓 og 元数据,抓取成功的链接经
+    # propagate_event 记入统一兴趣线(share 显式正向信号)。
+    propagate_event = getattr(getattr(soul_engine, "_memory", None), "propagate_event", None)
+    link_ingestor = LinkIngestor(
+        bilibili_client=_build_bilibili_client(),
+        event_sink=propagate_event if callable(propagate_event) else None,
+    )
     return SocraticDialogue(
         llm=_build_registry(),
         soul_engine=soul_engine,
         session="cli",
         learning_mode=DialogueLearningMode.LEGACY_DIRECT,
+        link_ingestor=link_ingestor,
     )
 
 

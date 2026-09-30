@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
     from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
     from openbiliclaw.soul.engine import SoulEngine
+    from openbiliclaw.sources.link_ingest import LinkIngestor, LinkIngestResult
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class SocraticDialogue:
         *,
         learning_mode: DialogueLearningMode | str,
         settlement_queue: DialogueSettlementQueue | None = None,
+        link_ingestor: LinkIngestor | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
@@ -165,6 +167,9 @@ class SocraticDialogue:
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
         self._learning_mode = DialogueLearningMode(learning_mode)
         self._settlement_queue = settlement_queue
+        # Chat link ingestion (issue #83): None disables it entirely, keeping
+        # prompt bytes identical to the pre-ingest baseline.
+        self._link_ingestor = link_ingestor
 
     @property
     def learning_mode(self) -> DialogueLearningMode:
@@ -223,9 +228,8 @@ class SocraticDialogue:
             self._ensure_history_loaded()
             history_length = len(self._history)
             turn_timestamp = self._local_now().isoformat()
-            self._history.append(
-                DialogueTurn(role="user", content=user_message, timestamp=turn_timestamp)
-            )
+            user_turn = DialogueTurn(role="user", content=user_message, timestamp=turn_timestamp)
+            self._history.append(user_turn)
 
             try:
                 service = self._llm_service or self._build_service()
@@ -234,6 +238,12 @@ class SocraticDialogue:
                     if binding is not None
                     else user_message
                 )
+                link_result = await self._ingest_message_links(user_message)
+                if link_result is not None:
+                    if link_result.prompt_block:
+                        prompt_message = f"{prompt_message}\n\n{link_result.prompt_block}"
+                    if link_result.relation_hint:
+                        user_turn.relation_prefix = link_result.relation_hint
                 prompt_user_message = self._user_prompt_with_current_time(prompt_message)
 
                 # If tools are configured, try tool-calling path first
@@ -377,14 +387,20 @@ class SocraticDialogue:
         async with self._respond_lock:
             self._ensure_history_loaded()
             history_length = len(self._history)
-            self._history.append(
-                DialogueTurn(
-                    role="user", content=user_message, timestamp=self._local_now().isoformat()
-                )
+            user_turn = DialogueTurn(
+                role="user", content=user_message, timestamp=self._local_now().isoformat()
             )
+            self._history.append(user_turn)
             try:
                 service = self._llm_service or self._build_service()
-                prompt_user_message = self._user_prompt_with_current_time(user_message)
+                prompt_message = user_message
+                link_result = await self._ingest_message_links(user_message)
+                if link_result is not None:
+                    if link_result.prompt_block:
+                        prompt_message = f"{prompt_message}\n\n{link_result.prompt_block}"
+                    if link_result.relation_hint:
+                        user_turn.relation_prefix = link_result.relation_hint
+                prompt_user_message = self._user_prompt_with_current_time(prompt_message)
                 tone_profile = None
                 build_tone = getattr(service, "_build_dialogue_tone_profile", None)
                 if callable(build_tone):
@@ -447,6 +463,23 @@ class SocraticDialogue:
                     "turn_id": turn_id,
                 }
             )
+
+    async def _ingest_message_links(self, user_message: str) -> LinkIngestResult | None:
+        """Fetch links shared in the user message, never blocking the reply.
+
+        Returns ``None`` when no ingestor is wired, the message carries no
+        URLs, or ingestion itself raised — the turn then proceeds byte-
+        identical to the pre-ingest baseline (prompt-cache convention).
+        """
+        ingestor = self._link_ingestor
+        if ingestor is None or "://" not in user_message:
+            return None
+        try:
+            result = await ingestor.ingest(user_message)
+        except Exception:
+            logger.warning("Link ingestion failed; continuing without link context", exc_info=True)
+            return None
+        return result if result.links else None
 
     async def _respond_with_tools(
         self, service: Any, user_message: str, progress: Any = None

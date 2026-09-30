@@ -2,7 +2,15 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 功能：对话内链接摄入——聊天粘贴 B站/知乎/小红书链接即被理解并记入偏好（2026-09-30，feat/chat-link-ingest）
+
+- **链接摄入服务（核心，issue #83）**：新增 `src/openbiliclaw/sources/link_ingest.py` 的 `LinkIngestor`。用户在聊天里粘贴链接（「我就喜欢这个」）时：① 从消息提取 URL（每条消息最多 3 个）；② 展开 b23.tv / xhslink.com 短链（跟随重定向，8s 超时、256 KiB 读取上限、非 HTML 拒绝，httpx 一律 `trust_env=False`，不给配置热重载留悬挂连接）；③ 按 `sources/platforms.py` 注册表识别平台——bilibili 复用 `BilibiliAPIClient.get_video_info`（标题/简介/UP 主/标签），知乎/小红书等抓页面 title/description/og 元数据（stdlib HTMLParser，零新依赖）；④ 摘要渲染为「【用户分享的链接】」块注入当轮 prompt，对话历史与审计仍存用户原文，仅 `relation_prefix`（如 `[分享了链接《…》]`）让后续轮次保持感知；⑤ 每个抓取成功的链接经 `MemoryManager.propagate_event` 记为 `share` 事件（显式正向偏好，默认信号强度 0.85，用户消息摘录进 `comment_text` 白名单字段直达偏好分析）。
+- **两条聊天入口共用一条接缝**：`SocraticDialogue` 新增可选 `link_ingestor` 依赖，`respond()` 与 `stream_agent_reply()` 在 user turn append 后、LLM 调用前预处理——Web 三端点（`/api/chat`、`/api/chat/stream`、`/api/chat/agent/stream`，`api/runtime_context.py` 装配）与 CLI `openbiliclaw chat`（`cli.py::_build_dialogue`）全覆盖；未装配 ingestor 时 prompt 逐字节不变。任何抓取/写入失败只降级当链接或记 WARNING，聊天永不阻塞。
+- **测试**：`tests/test_link_ingest.py` +17 条（URL 提取/去重/尾标点、b23.tv 与 xhslink 短链展开、B站 API 路径、知乎 og 元数据、XHS note_id 入事件、抓取失败/非 HTML/体积上限/条数上限降级、事件 sink 失败静默、share 事件形态）；`tests/test_dialogue_link_ingest.py` +5 条（prompt 注入且历史原文不变、relation_prefix、无链接基线不变、ingestor 异常不阻塞、agent stream 路径注入）。全部网络调用经注入 `http_client_factory` + `httpx.MockTransport` mock。
+- **文档同步**：`docs/modules/soul.md`（链接摄入特性行）、`docs/modules/api.md`（聊天端点链接摄入行）、`docs/modules/cli.md`（chat 命令行）、`docs/architecture.md`（sources 层模块清单）。
+
 ## 修复：文案/评估协调器退避静默 + runtime-status 恒显 idle（2026-09-30，fix/expression-copy-backoff-observability）
+
 
 - **退避可观测（核心）**：真实环境 e2e 发现 discovery worker 里的 `ExpressionCopyCoordinator` 在 provider 429 后进入 15/30/60/120/300s transient backoff，期间**零日志**——表现为「19 条待写文案 10 分钟无进展、无任何日志」。现按 candidate_eval 的 worker failed 风格补齐状态迁移日志：transient 退避（WARNING 含退避时长/pending/streak/失败摘要）、no_provider/auth_failed 暂停、零进展 15s 重试、退避后恢复（INFO）、config_*/manual_*/startup 唤醒恢复（INFO）各一条，干净 drain 不刷日志。`CandidateEvalCoordinator` 同类静默分支一并补齐：rate-limit 退避（此前只有 transient 有日志）、no_provider/auth_failed 暂停、退避后 recovered、唤醒 resumed。回归：`tests/test_expression_copy_coordinator.py` +4 条（退避 WARNING 含时长/pending/原因、恢复 INFO、零进展 WARNING、干净 drain 无 WARNING、暂停/恢复日志）、`tests/test_candidate_eval_coordinator.py` +1 条。
 - **runtime-status 聚合 worker 协调器真实状态**：`openbiliclaw start` 的 delegated 部署中两个协调器跑在 discovery worker 进程，API 进程内实例从不启动，`/api/runtime-status` 的 `expression_*` / `candidate_eval_*` 恒显 idle。不新建 IPC：discovery worker 搭车既有 `WorkerStatusStore` 文件心跳机制，每 10s 原子发布 `runtime/discovery_worker_status.json`（`extra.coordinators` 嵌套两个协调器的 `status_payload()`）；`WorkerStatusStore` 新增 `read_if_fresh()`（心跳超 45s 视为缺失），`runtime_context` 向 controller 装配 `delegated_coordinator_status_reader`，`get_runtime_status()` 在本地合并之后用新鲜的 worker 载荷覆盖同名键，文件缺失/过期保持本地值（单进程 `serve-api` 语义不变）。回归：`tests/test_worker_status.py` +1 条（read_if_fresh 新鲜/过期/缺失）、`tests/test_discovery_worker_status.py` +3 条（载荷收集、失败/缺失跳过、心跳端到端写读）、`tests/test_refresh_runtime.py` +2 条（delegated 覆盖本地 idle、reader 返回 None 保持本地）。
