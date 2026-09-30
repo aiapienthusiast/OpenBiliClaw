@@ -374,6 +374,8 @@ popup、移动 Web 与桌面 Web 只有 durable 对话中的假设卡片保留 c
 
 推荐进程运行同一套认证中间件，因此反代必须让它看到与入口一致的请求上下文，否则 CSRF 同源判定会失败。
 
+传输选择由父进程 `ensure_recommendation_transport_env()` 统一决定并经环境变量共享给反代与子进程：`OPENBILICLAW_RECOMMENDATION_PORT` 存在走 loopback TCP，否则走 `OPENBILICLAW_RECOMMENDATION_SOCK` 的 Unix socket；POSIX 下 socket 路径字节长度达到 `sun_path` 上限（104 字节含 NUL）时父进程自动改选 TCP 并记 WARNING，反代因此始终与子进程同一传输，不会出现一边 Unix 一边 TCP。
+
 | 已实现能力 | 接口 |
 | --- | --- |
 | 代理保留原始 Host | socket / loopback TCP 代理原样转发浏览器的 `Host`（不改写其值），推荐进程的 CSRF 同源校验（`Origin` vs effective host）因此与入口口径一致。 |

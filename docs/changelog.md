@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：数据目录过深时推荐子进程 AF_UNIX 路径超限崩溃（2026-09-30，fix/recommendation-socket-fallback）
+
+- **Unix socket 路径超限自动回退 TCP（现场故障）**：推荐子进程与主 API 之间的 Unix socket 路径由 `<data_dir>/runtime/recommendation.sock` 直接拼接，macOS 上 `sun_path` 上限约 104 字节，数据目录稍深子进程启动即以 `OSError: AF_UNIX path too long` 崩溃，API 侧随后报 `Recommendation proxy failed: All connection attempts failed`（生产日志 2026-09-28 出现 4 次）。现 `recommendation_runtime.ensure_recommendation_transport_env()` 在选 Unix socket 前对最终路径（含显式 `OPENBILICLAW_RECOMMENDATION_SOCK`）做字节长度检查，达到 104 字节（含 NUL，按最严 POSIX 平台计）即自动回退 loopback TCP（默认 `127.0.0.1:8423`）并记一条 WARNING（含实际路径长度与所选端口）；传输仍由父进程环境变量单一决定，子进程与 API 反代读同一组变量，双方始终一致。独立直接运行 `openbiliclaw.recommendation_server`（无继承环境变量）时同样的长度检查在进程内兜底，不再崩溃。Windows 行为不变（本就走 TCP）。回归：`tests/test_recommendation_runtime.py` +5 条（长度边界、超长派生路径回退 TCP 且 WARNING 含长度/上限/端口、超长显式 SOCK 回退、ensure 与 server 经共享 env 同选 TCP、server 独立运行超长路径兜底 TCP）。
+- **文档同步**：`docs/modules/cli.md`（start 四进程段落补传输选择与回退规则）、`docs/modules/api.md`（推荐反代小节补传输一致性说明）、`docs/architecture.md`（系统概览数据流标注回退）。
+
 ## 修复：reasoning 模型 length 截断导致关键词 planner 持续回退（2026-09-30，fix/keyword-planner-length-retry）
 
 - **`finish_reason=length` 预算放大重试（核心，现场故障）**：生产 7~9 月日志中 `keyword planner merged generation failed; falling back to interest names` 出现 21+ 次，搜索词质量下降。根因：配置了 `reasoning_effort` 的 OpenAI 兼容端点把输出预算全部耗在 thinking 上，响应以 `finish_reason=length` 结束——要么 `content` 为空（reasoning-only），要么 JSON 被截断。既有自愈路径都覆盖不到：「去掉 `response_format` 重试」用同一 `max_tokens` 重发必然再次 length；「显式禁 thinking 重试」只在调用方显式传 `reasoning_effort=""` 时触发，而 planner 等路由传 `None` 跟随实例配置。现 `OpenAIProvider.complete()`（chat-completions 路径，全部 OpenAI 协议子类继承）在两种 length 截断下各追加一次翻倍预算重试（封顶 32768，已达上限则不重试）：① 空 `content` 走完既有重试梯后仍为 length；② json_mode 下 JSON 被截断但有正文。重试保留原请求其余参数；仍失败时抛出与此前一致的 `returned reasoning but no final content (finish_reason=length)` 错误，planner 及 soul / discovery / recommendation / evaluation 各路由的回退行为不变。回归：`tests/test_llm_providers.py` +4 条（reasoning-only 放大重试成功且参数正确、截断 JSON 放大重试、重试耗尽后错误与回退不变、已达封顶不重试）。

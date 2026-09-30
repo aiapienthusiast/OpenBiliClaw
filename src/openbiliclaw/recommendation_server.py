@@ -24,7 +24,9 @@ from openbiliclaw.recommendation_runtime import (
     DEFAULT_RECOMMENDATION_PORT,
     RECOMMENDATION_PORT_ENV,
     RECOMMENDATION_SOCK_ENV,
+    UNIX_SOCKET_SUN_PATH_BYTES,
     recommendation_sock_from_data_path,
+    unix_socket_path_too_long,
 )
 
 if TYPE_CHECKING:
@@ -85,6 +87,17 @@ def main() -> None:
     sock = os.environ.get(RECOMMENDATION_SOCK_ENV)
     if not sock:
         sock = recommendation_sock_from_data_path(load_config().data_path)
+        if unix_socket_path_too_long(sock):
+            logger.warning(
+                "Recommendation Unix socket path %r is %d bytes, exceeding the "
+                "%d-byte AF_UNIX sun_path limit; falling back to TCP 127.0.0.1:%d",
+                sock,
+                len(os.fsencode(sock)),
+                UNIX_SOCKET_SUN_PATH_BYTES,
+                DEFAULT_RECOMMENDATION_PORT,
+            )
+            uvicorn.run(app, host="127.0.0.1", port=DEFAULT_RECOMMENDATION_PORT, log_level="info")
+            return
     os.makedirs(os.path.dirname(sock), mode=0o700, exist_ok=True)
     uvicorn.run(app, uds=sock, log_level="info")
 
