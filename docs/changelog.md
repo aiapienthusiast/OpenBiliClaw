@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：桌面 web e2e 稳定性（2026-09-30，fix/e2e-stability）
+
+- **pool_refill 稳定性 e2e 按真实线上事件格式注入（测试过期，非产品 bug）**：`tests/test_desktop_web_list_stability_e2e.py::test_pool_refill_event_keeps_loaded_cards_and_scroll_position` 在干净 main 上稳定红，末条断言 `#metricPool == "70"` 不成立（实为 40）。根因：自 `408de9a8` 起头部库存只跟随带 `pool_status_version` 的已提交库存快照（`normalizeRuntimeStatus` 优先 `state.platformAvailability.total_available`，无版本事件的裸 `pool_available_count` 不再驱动头部），而测试注入的 `refresh.pool_updated` 缺 `pool_status_version` / `platform_available_counts`。产品行为正确（防 HTTP/WebSocket 竞态下旧快照覆盖新快照），故按真实后端 `_broadcast_recommendation_pool_status` 的线上格式补全注入字段，断言与 DOM 原地存活 / 滚动位置契约保持不变。
+- **dialogue 布局 e2e 滚轮 flake 改确定性等待**：`tests/test_desktop_dialogue_layout_e2e.py::test_many_dialogue_cards_keep_natural_height_and_scroll` 的 `mouse.wheel` 后固定 `wait_for_timeout(80)` 在并行负载下会早采样到 `scrollTop=0`（headless Chromium 滚轮滚动由合成器异步落地，实测延迟可超 80ms、随后正常到位），改为 `wait_for_function` 轮询到 `scrollTop` 真正前进再断言，连跑 5 遍全绿。
+
 ## 修复：failed_eval 死信无复活路径 + pool maintenance 不变量测量噪声自锁（2026-09-30，fix/pool-eval-recovery）
 
 - **failed_eval 死信复活（核心，现场故障）**：某 Windows 用户 7 月 deepseek 401/404 配置错误把 568 条候选的评估预算烧进 `failed_eval`，此后 provider 修好这批候选也没有任何回到 `pending_eval` 的路径，候选池只出不进。新增 `Database.revive_failed_eval_candidates(limit=500, max_revives=3)`（重置 status / `eval_attempts` / `batch_eval_attempts` / `eval_error` 与 claim 字段，`temporal_review_due:*` 行归 temporal 复审机制所有不参与）；`CandidateEvalCoordinator` 新增 `revive_failed_eval_callback`，在恢复信号（config rebuild 后的 `startup`、`config_*` / `manual_*` 唤醒，即解除 paused 的同一组 reason）触发一次复活，经 `DiscoveryCandidatePipeline.revive_failed_eval_candidates()` 委托到 storage。有界性两层保证：单次最多 `limit` 行 + 每候选持久化 `eval_revive_count` 终生最多复活 `max_revives` 次，对着仍然坏掉的 provider 反复重启不会无限重烧 LLM 配额。复活失败只记 WARNING，不影响唤醒路径。回归：`tests/test_failed_eval_revival.py` 11 条（状态/预算重置、单次限量、持久化复活上限、temporal 行跳过、coordinator 触发时机与异常隔离、pipeline 委托）。
