@@ -440,6 +440,12 @@ _MAINTENANCE_DB_BUSY_TIMEOUT_MS = 75
 # while bounding every write transaction; the async runner releases the lock
 # and yields the loop between batches.
 _POOL_MAINTENANCE_BATCH_SIZE = 50
+# failed_eval dead-letter revival: one resume event re-queues at most this
+# many rows, and each row can be resurrected at most this many times ever
+# (persisted in ``eval_revive_count``) so a process restarting against a
+# still-broken provider cannot re-burn LLM quota without bound.
+_FAILED_EVAL_REVIVE_BATCH_SIZE = 500
+_FAILED_EVAL_MAX_REVIVES = 3
 _NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
 _LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
 _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS = {
@@ -7715,6 +7721,60 @@ class Database:
         )
         return int(cursor.rowcount)
 
+    def revive_failed_eval_candidates(
+        self,
+        *,
+        limit: int = _FAILED_EVAL_REVIVE_BATCH_SIZE,
+        max_revives: int = _FAILED_EVAL_MAX_REVIVES,
+    ) -> int:
+        """Re-queue a bounded batch of dead-lettered candidates for evaluation.
+
+        ``failed_eval`` rows have no organic path back to ``pending_eval``:
+        once a provider outage burns through the attempt budget the pool can
+        only drain (field log 2026-08: 568 candidates died to a deepseek
+        401/404 misconfiguration and the pool never refilled). The candidate
+        evaluation coordinator calls this on resume signals — startup after a
+        config rebuild, ``config_*``/``manual_*`` wakes — so rows dead-lettered
+        by a transient provider failure get fresh attempts once evaluation may
+        work again.
+
+        Boundedness: at most ``limit`` rows revive per call, and each row
+        carries a persistent ``eval_revive_count`` capped at ``max_revives``,
+        so restarting against a still-broken provider cannot resurrect the
+        same candidates (and re-burn their LLM attempts) forever. Rows parked
+        for temporal re-review keep their existing owner and are not touched.
+        Returns the number of rows moved back to ``pending_eval``.
+        """
+
+        max_rows = max(0, int(limit))
+        if max_rows <= 0:
+            return 0
+        revive_cap = max(0, int(max_revives))
+        cursor = self._execute_write(
+            """
+            UPDATE discovery_candidates
+            SET status = 'pending_eval',
+                eval_attempts = 0,
+                batch_eval_attempts = 0,
+                eval_revive_count = eval_revive_count + 1,
+                eval_error = '',
+                claimed_at = NULL,
+                claim_token = NULL,
+                last_seen_at = CURRENT_TIMESTAMP
+            WHERE id IN (
+                SELECT id
+                FROM discovery_candidates
+                WHERE status = 'failed_eval'
+                  AND eval_revive_count < ?
+                  AND COALESCE(eval_error, '') NOT LIKE 'temporal_review_due:%'
+                ORDER BY id ASC
+                LIMIT ?
+            )
+            """,
+            (revive_cap, max_rows),
+        )
+        return int(cursor.rowcount)
+
     def mark_discovery_candidate_cached(self, candidate_id: int) -> None:
         """Mark an evaluated candidate as successfully inserted into content_cache."""
 
@@ -14664,6 +14724,9 @@ class Database:
             "temporal_evidence_complete": "INTEGER NOT NULL DEFAULT 0",
             "temporal_review_attempts": "INTEGER NOT NULL DEFAULT 0",
             "temporal_review_retry_at": "TEXT NOT NULL DEFAULT ''",
+            # Dead-letter revival budget: persisted so restarting against a
+            # still-broken provider cannot resurrect the same rows forever.
+            "eval_revive_count": "INTEGER NOT NULL DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
