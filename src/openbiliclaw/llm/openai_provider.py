@@ -339,6 +339,22 @@ class OpenAIProvider(LLMProvider):
         message = choice.message
         content = message.content or ""
         tool_calls = self._parse_native_tool_calls(message)
+        if not content.strip() and not tool_calls and self._length_truncated(choice):
+            # A reasoning-first endpoint burned the whole output budget on
+            # thinking before emitting content or tool calls; only a larger
+            # budget lets the turn complete. The retry keeps the tools
+            # payload intact; a response with tool calls never enters here.
+            retried = await self._retry_with_larger_budget(
+                kwargs,
+                max_tokens=max_tokens,
+                send=lambda kw: self._chat_request_with_temperature_compat(**kw),
+            )
+            if retried is not None:
+                response, max_tokens = retried
+                choice = response.choices[0]
+                message = choice.message
+                content = message.content or ""
+                tool_calls = self._parse_native_tool_calls(message)
         if not content.strip() and not tool_calls:
             raise self._empty_content_error(choice)
 
