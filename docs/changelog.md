@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 新增：CLI chat 支持多行输入（2026-09-30，feat/cli-multiline-input，issue #83）
+
+- **多行输入（核心）**：用户反馈「求能换行」，此前 `openbiliclaw chat` 用 `typer.prompt` 单行读取，与 Web 端（Shift+Enter 换行）体验不一致。现交互式终端（stdin/stdout 均为 TTY）下输入框改由 prompt_toolkit `PromptSession` 驱动：Enter 发送，Esc+Enter（或 Alt+Enter，终端中即 Meta+Enter）插入换行，进入对话时副标题提示快捷键；非 TTY 环境（管道、重定向、自动化测试）自动回退原单行 `typer.prompt`，退出命令（exit / quit / 空行）、Ctrl+C/Ctrl+D 终止、单轮失败续聊等行为不变。可测逻辑抽到 `openbiliclaw.cli_input`：`supports_multiline_prompt()`（TTY 判定）、`is_chat_exit_command()`（退出判定）、`build_multiline_key_bindings()` / `build_multiline_session()`（会话构造）。新增依赖 `prompt_toolkit>=3.0`（输入交互能力此前全库缺失，无既有依赖可复用）。回归：`tests/test_cli_input.py` +6 条（TTY 判定双真才启用、退出命令大小写/空白/多行不误判、multiline buffer 与 Enter / Esc+Enter 键绑定注册、快捷键提示文案）。
+- **文档同步**：`docs/modules/cli.md`（`chat` 小节补多行输入与回退规则）。
+
 ## 功能：对话内链接摄入——聊天粘贴 B站/知乎/小红书链接即被理解并记入偏好（2026-09-30，feat/chat-link-ingest）
 
 - **链接摄入服务（核心，issue #83）**：新增 `src/openbiliclaw/sources/link_ingest.py` 的 `LinkIngestor`。用户在聊天里粘贴链接（「我就喜欢这个」）时：① 从消息提取 URL（每条消息最多 3 个）；② 展开 b23.tv / xhslink.com 短链（跟随重定向，8s 超时、256 KiB 读取上限、非 HTML 拒绝，httpx 一律 `trust_env=False`，不给配置热重载留悬挂连接）；③ 按 `sources/platforms.py` 注册表识别平台——bilibili 复用 `BilibiliAPIClient.get_video_info`（标题/简介/UP 主/标签），知乎/小红书等抓页面 title/description/og 元数据（stdlib HTMLParser，零新依赖）；④ 摘要渲染为「【用户分享的链接】」块注入当轮 prompt，对话历史与审计仍存用户原文，仅 `relation_prefix`（如 `[分享了链接《…》]`）让后续轮次保持感知；⑤ 每个抓取成功的链接经 `MemoryManager.propagate_event` 记为 `share` 事件（显式正向偏好，默认信号强度 0.85，用户消息摘录进 `comment_text` 白名单字段直达偏好分析）。

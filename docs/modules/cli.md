@@ -1569,7 +1569,10 @@ openbiliclaw init
 runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
 但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒
 卡片轮询只服务 popup、移动 Web 与桌面 Web 卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
-`exit`、`quit` 或空行可结束。聊天内容
+`exit`、`quit` 或空行可结束。交互式终端下（stdin/stdout 均为 TTY）输入框由
+prompt_toolkit 驱动，支持多行输入：Enter 发送，Esc+Enter（或 Alt+Enter）插入换行，
+进入对话时副标题会提示该快捷键；管道、重定向等非 TTY 环境自动回退为原来的单行
+`typer.prompt` 读取，行为与此前完全一致。聊天内容
 仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
 单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
 
