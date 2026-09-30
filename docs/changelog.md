@@ -2,6 +2,12 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：LLM length 自愈两缺口——工具调用路径 + Responses reasoning 标识（2026-09-30，fix/llm-tools-length-responses-reasoning）
+
+- **原生工具调用补齐 length 预算放大重试（缺口 1）**：`OpenAIProvider.complete_with_tools()` 此前在 reasoning 模型把输出预算烧光（空 `content`、无 `tool_calls`、`finish_reason=length`）时直接 raise，agent loop 硬失败，而普通 `complete()` 已有翻倍预算自愈。现复用共享 `_retry_with_larger_budget()`：该场景翻倍 `max_tokens` 重试一次（封顶 32768 语义一致、已达上限不重试、`tools` / `tool_choice` 及其余参数原样保留）；携带 tool_calls 的响应永不进入重试，重试仍失败时抛出与此前一致的 reasoning-budget 错误。Responses-flavor 无原生 FC，其 prompt 模拟工具调用走 `complete()`，已被 `e4fa214e` 的 flavor 修复覆盖，本次补服务级集成回归。回归：`tests/test_llm_native_tools.py` +4 条（放大重试成功且 tools 保留、耗尽后错误可被 `is_reasoning_budget_exhausted()` 识别、正常 tool_calls 路径零重试、responses-flavor 模拟工具调用经放大重试恢复）。
+- **Responses 路径补齐 reasoning 预算耗尽标识（缺口 2）**：chat 路径对 reasoning-only 空响应报 `returned reasoning but no final content (finish_reason=length)`，`is_reasoning_budget_exhausted()` 据此触发 discovery `_evaluate_batch` / recommendation 分类与预计算批的「批减半递归重试」；Responses 路径此前统一报 `returned empty content`，该自愈对 `api_flavor="responses"` 实例不生效。现 `_complete_via_responses()` 在 `output` 含 `type="reasoning"` 条目但无最终 message 时抛出与 chat 完全相同的标识形态：`status="incomplete"` + `incomplete_details.reason="max_output_tokens"` 映射为 `finish_reason=length`（可被识别），其余终态映射为自身状态名（不被识别，镜像 chat 的非 length finish_reason）；无 reasoning 条目的空响应仍报 `returned empty content`。顺序保证：先走「去 text.format → 翻倍预算」重试梯，全部耗尽后才落该错误。回归：`tests/test_llm_providers.py` +3 条（reasoning+截断错误可识别且放大重试先于错误、无 reasoning 条目不误识别、reasoning+非截断终态不带 length 标识）、`tests/test_llm_service.py` +1 条（responses 实例的错误经 registry fallback + service 包装后仍可被 `is_reasoning_budget_exhausted()` 识别，即评估批减半路径现在能触发）。
+- **文档同步**：`docs/modules/llm.md`（「reasoning-only 诊断与兼容端点自愈」行补 Responses flavor 标识、「finish_reason=length 预算放大重试」行补工具调用路径）。
+
 ## 修复：dialogue 布局 e2e 剩余滚轮固定等待收口（2026-09-30，fix/e2e-wheel-wait）
 
 - **`test_pending_inbox_is_bounded_and_independently_scrollable` 同款 flake 收口（纯测试）**：与 `fix/e2e-stability` 修过的 `test_many_dialogue_cards_keep_natural_height_and_scroll` 完全相同的模式——`mouse.wheel` 后固定 `wait_for_timeout(80)` 断言 `#desktopPendingConfirmations` 的 `scrollTop` 前进，headless Chromium 滚轮滚动由合成器异步落地，固定等待会早采样。同样改为 `wait_for_function` 轮询到 `scrollTop` 真正前进再断言；至此该文件内 wheel-scroll 断言的固定等待全部消除，连跑 5 遍全绿。

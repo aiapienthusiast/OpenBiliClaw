@@ -533,7 +533,7 @@ class OpenAIProvider(LLMProvider):
                     response, max_tokens = retried
                     content = self._responses_output_text(response)
         if not content.strip():
-            raise LLMResponseError(f"{self._provider_name} returned empty content")
+            raise self._responses_empty_content_error(response)
 
         usage = None
         raw_usage = getattr(response, "usage", None)
@@ -970,6 +970,43 @@ class OpenAIProvider(LLMProvider):
         if reason is None and isinstance(details, dict):
             reason = details.get("reason")
         return str(reason or "") == "max_output_tokens"
+
+    @staticmethod
+    def _responses_reasoning_output(response: Any) -> bool:
+        """Whether a Responses payload contains reasoning-phase output items."""
+        for item in getattr(response, "output", None) or []:
+            item_type = getattr(item, "type", None)
+            if item_type is None and isinstance(item, dict):
+                item_type = item.get("type")
+            if str(item_type or "") == "reasoning":
+                return True
+        return False
+
+    def _responses_empty_content_error(self, response: Any) -> LLMResponseError:
+        """Empty-content error for the Responses flavor.
+
+        When the payload carries reasoning-phase output but no final message,
+        mirror the chat path's marker pair (``returned reasoning but no final
+        content`` + ``finish_reason=length``) so
+        ``is_reasoning_budget_exhausted()`` — and the evaluation
+        batch-halving self-heal built on it — recognizes the failure. The
+        Responses API expresses chat's ``finish_reason=length`` as
+        ``status="incomplete"`` with reason ``max_output_tokens``; any other
+        terminal status maps to its own name and stays unrecognized, exactly
+        like a non-length finish reason on the chat path.
+        """
+        if self._responses_reasoning_output(response):
+            finish_reason = (
+                "length"
+                if self._responses_output_truncated(response)
+                else str(getattr(response, "status", "") or "unknown")
+            )
+            return LLMResponseError(
+                f"{self._provider_name} returned reasoning but no final content "
+                f"(finish_reason={finish_reason}); "
+                "disable thinking/reasoning or increase max_tokens"
+            )
+        return LLMResponseError(f"{self._provider_name} returned empty content")
 
     async def _retry_with_larger_budget(
         self,
