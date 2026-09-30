@@ -2,6 +2,12 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：移动端播放画质选择（2026-09-30）
+
+- B 站 DASH 取流先匹配请求的画质编号，再在该画质内优先选择指定编码。修复真实 iOS 播放中请求 480P（qn=32）却因选择首个 AVC 候选而返回 1080P（qn=80）的问题；目标画质不可用时沿用原有回退行为。
+- 补充覆盖多画质 / 多编码候选、编码偏好和不可用画质回退的回归测试。
+- 验证：相关 pytest 56 项、全仓 Ruff、295 个源码文件的 MyPy 通过；本机真实后端与 iOS 26.5 模拟器端到端验证请求 qn=32 后实际解码 850×480，并继续播放超过三秒。
+
 ## 修复：failed_eval 死信无复活路径 + pool maintenance 不变量测量噪声自锁（2026-09-30，fix/pool-eval-recovery）
 
 - **failed_eval 死信复活（核心，现场故障）**：某 Windows 用户 7 月 deepseek 401/404 配置错误把 568 条候选的评估预算烧进 `failed_eval`，此后 provider 修好这批候选也没有任何回到 `pending_eval` 的路径，候选池只出不进。新增 `Database.revive_failed_eval_candidates(limit=500, max_revives=3)`（重置 status / `eval_attempts` / `batch_eval_attempts` / `eval_error` 与 claim 字段，`temporal_review_due:*` 行归 temporal 复审机制所有不参与）；`CandidateEvalCoordinator` 新增 `revive_failed_eval_callback`，在恢复信号（config rebuild 后的 `startup`、`config_*` / `manual_*` 唤醒，即解除 paused 的同一组 reason）触发一次复活，经 `DiscoveryCandidatePipeline.revive_failed_eval_candidates()` 委托到 storage。有界性两层保证：单次最多 `limit` 行 + 每候选持久化 `eval_revive_count` 终生最多复活 `max_revives` 次，对着仍然坏掉的 provider 反复重启不会无限重烧 LLM 配额。复活失败只记 WARNING，不影响唤醒路径。回归：`tests/test_failed_eval_revival.py` 11 条（状态/预算重置、单次限量、持久化复活上限、temporal 行跳过、coordinator 触发时机与异常隔离、pipeline 委托）。
