@@ -607,6 +607,173 @@ async def test_openai_compatible_retries_explicit_no_reasoning_with_disabled_thi
     assert "reasoning_effort" not in calls[2]
 
 
+def _length_exhausted_response() -> SimpleNamespace:
+    return SimpleNamespace(
+        model="reasoning-model",
+        choices=[
+            SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(
+                    content="",
+                    reasoning_content="reasoning exhausted the output budget",
+                ),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=8192,
+            total_tokens=8202,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_retries_length_exhausted_reasoning_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyword-planner shape: configured effort, reasoning-only length truncation.
+
+    The generic recovery for callers that keep the provider's configured
+    ``reasoning_effort`` is a doubled output budget, not a thinking-disable
+    retry (which only applies to explicit no-reasoning calls).
+    """
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="reasoning-model",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        reasoning_effort="low",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) < 3:
+            return _length_exhausted_response()
+        return _openai_response('{"keywords":["并发控制"]}')
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    response = await provider.complete(
+        [{"role": "user", "content": "return json"}],
+        json_mode=True,
+        max_tokens=8192,
+    )
+
+    assert response.content == '{"keywords":["并发控制"]}'
+    assert len(calls) == 3
+    # Ladder: original ask → empty-content retry without response_format →
+    # length retry with a doubled budget (routing params preserved).
+    assert calls[0]["max_tokens"] == 8192
+    assert "response_format" not in calls[1]
+    assert calls[1]["max_tokens"] == 8192
+    assert calls[2]["max_tokens"] == 16384
+    assert calls[2]["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_retries_length_truncated_json_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON payload cut off mid-stream (finish_reason=length) is retried once
+    with a doubled budget instead of being handed to the parser truncated."""
+    provider = OpenAIProvider(
+        api_key="test-key",
+        provider_name="openai_compatible",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            return SimpleNamespace(
+                model="gpt-4o",
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(content='{"keywords":["并发'),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=512, total_tokens=522),
+            )
+        return _openai_response('{"keywords":["并发控制"]}')
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    response = await provider.complete(
+        [{"role": "user", "content": "return json"}],
+        json_mode=True,
+        max_tokens=512,
+    )
+
+    assert response.content == '{"keywords":["并发控制"]}'
+    assert len(calls) == 2
+    assert calls[1]["max_tokens"] == 1024
+    assert calls[1]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_raises_reasoning_error_when_length_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When even the doubled budget comes back length-truncated and empty, the
+    original reasoning-budget error (and downstream fallback) is unchanged."""
+    provider = OpenAIProvider(
+        api_key="test-key",
+        provider_name="openai_compatible",
+        reasoning_effort="low",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return _length_exhausted_response()
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        await provider.complete(
+            [{"role": "user", "content": "return json"}],
+            json_mode=True,
+            max_tokens=8192,
+        )
+
+    message = str(exc_info.value)
+    assert "returned reasoning but no final content" in message
+    assert "finish_reason=length" in message
+    assert len(calls) == 3
+    assert calls[-1]["max_tokens"] == 16384
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_skips_length_retry_when_budget_at_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At or above the retry cap a retry would resend the same request, so the
+    call fails directly on the reasoning-only error."""
+    provider = OpenAIProvider(
+        api_key="test-key",
+        provider_name="openai_compatible",
+        reasoning_effort="low",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return _length_exhausted_response()
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        await provider.complete(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=32768,
+        )
+
+    assert "returned reasoning but no final content" in str(exc_info.value)
+    assert len(calls) == 1
+
+
 @pytest.mark.asyncio
 async def test_claude_provider_normalizes_response(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = ClaudeProvider(api_key="test-key")
@@ -2221,8 +2388,8 @@ async def test_openai_chat_retries_when_temperature_must_be_one(
         if not calls:
             calls.append(dict(kwargs))
             raise LLMProviderError(
-                'openai_compatible request failed: HTTP 400: '
-                'field Temperature invalid, only 1 is allowed for this model'
+                "openai_compatible request failed: HTTP 400: "
+                "field Temperature invalid, only 1 is allowed for this model"
             )
         calls.append(dict(kwargs))
         return _openai_response("ok")

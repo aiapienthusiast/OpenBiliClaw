@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：reasoning 模型 length 截断导致关键词 planner 持续回退（2026-09-30，fix/keyword-planner-length-retry）
+
+- **`finish_reason=length` 预算放大重试（核心，现场故障）**：生产 7~9 月日志中 `keyword planner merged generation failed; falling back to interest names` 出现 21+ 次，搜索词质量下降。根因：配置了 `reasoning_effort` 的 OpenAI 兼容端点把输出预算全部耗在 thinking 上，响应以 `finish_reason=length` 结束——要么 `content` 为空（reasoning-only），要么 JSON 被截断。既有自愈路径都覆盖不到：「去掉 `response_format` 重试」用同一 `max_tokens` 重发必然再次 length；「显式禁 thinking 重试」只在调用方显式传 `reasoning_effort=""` 时触发，而 planner 等路由传 `None` 跟随实例配置。现 `OpenAIProvider.complete()`（chat-completions 路径，全部 OpenAI 协议子类继承）在两种 length 截断下各追加一次翻倍预算重试（封顶 32768，已达上限则不重试）：① 空 `content` 走完既有重试梯后仍为 length；② json_mode 下 JSON 被截断但有正文。重试保留原请求其余参数；仍失败时抛出与此前一致的 `returned reasoning but no final content (finish_reason=length)` 错误，planner 及 soul / discovery / recommendation / evaluation 各路由的回退行为不变。回归：`tests/test_llm_providers.py` +4 条（reasoning-only 放大重试成功且参数正确、截断 JSON 放大重试、重试耗尽后错误与回退不变、已达封顶不重试）。
+- **文档同步**：`docs/modules/llm.md`（新增「finish_reason=length 预算放大重试」行）。
+
 ## 修复：移动端播放画质选择（2026-09-30）
 
 - B 站 DASH 取流先匹配请求的画质编号，再在该画质内优先选择指定编码。修复真实 iOS 播放中请求 480P（qn=32）却因选择首个 AVC 候选而返回 1080P（qn=80）的问题；目标画质不可用时沿用原有回退行为。

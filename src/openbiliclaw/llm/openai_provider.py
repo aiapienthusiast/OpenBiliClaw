@@ -43,6 +43,15 @@ _BILLING_BACKOFF_MARKERS = (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+# A reasoning-first endpoint can burn the entire output budget on invisible
+# thinking and finish with ``finish_reason=length`` — either with empty
+# ``content`` or with a JSON payload truncated mid-stream. Retrying with the
+# same ``max_tokens`` cannot succeed, so ``complete()`` reissues the request
+# once with a doubled budget, capped here to stay within common provider
+# ceilings (DeepSeek documents 64K; many gateways reject anything above 32K).
+_LENGTH_FINISH_REASONS = frozenset({"length", "max_tokens"})
+_LENGTH_RETRY_MAX_TOKENS_CAP = 32768
+
 
 class _NonRetryableRequestError(LLMProviderError):
     """A request/configuration failure that cannot heal through immediate retry."""
@@ -191,6 +200,15 @@ class OpenAIProvider(LLMProvider):
                 raise
         choice = response.choices[0]
         content = choice.message.content or ""
+        if json_mode and content.strip() and self._length_truncated(choice):
+            # The model was cut off mid-JSON by the output cap; the partial
+            # payload is unparseable for structured callers. Retry once with
+            # a doubled budget instead of handing truncated text downstream.
+            retried = await self._chat_retry_with_larger_budget(kwargs, max_tokens=max_tokens)
+            if retried is not None:
+                response, max_tokens = retried
+                choice = response.choices[0]
+                content = choice.message.content or ""
         if not content.strip():
             # Some OpenAI-compatible backends return HTTP 200 and report
             # completion_tokens > 0, yet ``message.content`` is empty when
@@ -231,6 +249,17 @@ class OpenAIProvider(LLMProvider):
                 response = await self._chat_request_with_temperature_compat(**kwargs)
                 choice = response.choices[0]
                 content = choice.message.content or ""
+            if not content.strip() and self._length_truncated(choice):
+                # A reasoning-first endpoint spent the whole budget on thinking
+                # and returned reasoning-only output; only a larger budget lets
+                # the final answer through. This is the generic recovery for
+                # callers that keep the provider's configured effort (e.g. the
+                # keyword planner's merged generation).
+                retried = await self._chat_retry_with_larger_budget(kwargs, max_tokens=max_tokens)
+                if retried is not None:
+                    response, max_tokens = retried
+                    choice = response.choices[0]
+                    content = choice.message.content or ""
             if not content.strip():
                 raise self._empty_content_error(choice)
 
@@ -863,6 +892,36 @@ class OpenAIProvider(LLMProvider):
         """
         del reasoning_effort
         return {}
+
+    @staticmethod
+    def _length_truncated(choice: Any) -> bool:
+        """Whether the choice was cut off by the output-token cap."""
+        return str(getattr(choice, "finish_reason", "") or "") in _LENGTH_FINISH_REASONS
+
+    async def _chat_retry_with_larger_budget(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        max_tokens: int,
+    ) -> tuple[Any, int] | None:
+        """Reissue a length-truncated chat request once with a doubled budget.
+
+        Returns ``(response, new_max_tokens)`` when a retry was sent, or
+        ``None`` when the budget is already at the cap (a retry would send the
+        same request). ``kwargs`` is updated in place so any later retry in
+        the same call keeps the enlarged budget.
+        """
+        new_budget = min(max(max_tokens, 1) * 2, _LENGTH_RETRY_MAX_TOKENS_CAP)
+        if new_budget <= max_tokens:
+            return None
+        logger.warning(
+            "%s hit finish_reason=length with max_tokens=%s; retrying with max_tokens=%s",
+            self._provider_name,
+            max_tokens,
+            new_budget,
+        )
+        kwargs["max_tokens"] = new_budget
+        return await self._chat_request_with_temperature_compat(**kwargs), new_budget
 
     def _empty_content_error(self, choice: Any) -> LLMResponseError:
         reasoning = self._reasoning_like_content(getattr(choice, "message", None))
