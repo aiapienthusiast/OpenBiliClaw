@@ -20,7 +20,8 @@ LLM 实例设置页可选择 `api_route`（API Route），新实例预填 `gpt-5
 | M8 skill 切换 | ✅ | 会话条 skill chip（图标+名称）弹出角色选择浮层（`GET /api/chat/skills`），按会话记忆选择、下一回合生效；`suggest_skill` 工具调用渲染为切换卡（一键切换/忽略） |
 | M8 审批卡 | ✅ | `approval_request` 渲染审批卡（summary+参数+impact，批准并执行/拒绝可填理由）；侧栏「待审批」入口带未读 badge（轮询 `?status=pending`，抽屉并列展示 executing 记录）；approve 端点异步执行：批准只入队，卡片就地转「执行中…」（按钮移除防重复点击），终态由 2.5s 轮询 `GET /api/chat/approvals`（executing 列表 + 全量快照）落到「已批准并执行」（含 result 摘要）或「已批准，但执行失败」（含 error 详情）；刷新/回放时 executing 记录覆盖归约出的 pending 卡恢复中间态；旧协议（响应无 `queued` 字段、同步返回 ok/result）按 `normalizeApproveResponse` 兜底直接显示结果；回放里 `approval_result` 显示审批结局与执行结果 |
 | M8 任务中心 | ✅ | 侧栏入口 + 右侧抽屉：任务列表（状态/进度/取消）、详情复用过程流组件渲染 `steps`、完成后 report + 建议清单（逐项确认：soft_write「确认执行」/ hard_write「去对话确认」，v1 统一落成来源会话里的结构化指令消息）；`start_background_task` 确认卡；`agent_task_summary` turn 渲染系统汇总卡 |
-| M8 回退与兼容 | ✅ | 探测 `GET /api/chat/skills` 失败 → legacy 模式（布局与行为与 M8 前完全一致）；agent 流 503（`loop_enabled=false`）时当轮回退旧 `/api/chat/stream` 假流式；delight/探针内嵌聊天、假设卡片、待聊确认、对话上下文引用等旧功能不动 |
+| M8 回退与兼容 | ✅ | 探测 `GET /api/chat/skills` 失败 → legacy 模式（布局与行为与 M8 前完全一致）；agent 流 503（`loop_enabled=false`）时当轮回退旧 `/api/chat/stream` 单跳流式；delight/探针内嵌聊天、假设卡片、待聊确认、对话上下文引用等旧功能不动 |
+| token 级流式渲染（issue #83） | ✅ | agent 流的 `delta` 事件逐 token 追加进实时回复气泡（`handleAgentStreamEvent` 直接累加 `live.replyText`；中间跳的 `thinking` 事件清空它、文本移入过程流，`final` / `done` 全文接管）；legacy 单跳流式沿用 `content` 增量渲染，后端换成真 delta 后自动受益 |
 
 ## 模块结构
 
@@ -54,7 +55,7 @@ web/desktop/
   `session_id` 与 `skill`）创建 pending turn，再消费
   `POST /api/chat/agent/stream` 的 SSE；每个事件经
   `OpenBiliClawChatAgentCore.createSseParser` 解析后 apply 进 live 过程模型并
-  重渲染。503 时 `legacyStreamForTurn()` 复用旧假流式端点完成同一 turn。
+  重渲染。503 时 `legacyStreamForTurn()` 复用旧单跳流式端点完成同一 turn。
 - **历史**：agent 模式下 `refreshDialogueTurns()` 改拉
   `GET /api/chat/sessions/{id}?limit=100`（默认会话收编 legacy turn），
   `selectDialogueTurns` 过滤口径不变；带 `agent_events` 的 turn 由

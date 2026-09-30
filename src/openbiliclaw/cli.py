@@ -16206,6 +16206,31 @@ def discover(
         _print_discovered_content_preview(item, index)
 
 
+async def _stream_dialogue_reply(dialogue: Any, user_message: str) -> str:
+    """Print one chat reply token by token and return the full text.
+
+    Deltas print without markup/highlight parsing and without newlines so
+    the reply types out inline after a single ``阿花：`` prefix. Dialogue
+    doubles without ``respond_stream`` fall back to the one-shot print.
+    """
+    stream_fn = getattr(dialogue, "respond_stream", None)
+    if not callable(stream_fn):
+        reply = str(await dialogue.respond(user_message))
+        console.print(f"阿花：{reply}")
+        return reply
+    parts: list[str] = []
+    printed_prefix = False
+    async for delta in stream_fn(user_message):
+        if not printed_prefix:
+            console.print("阿花：", end="")
+            printed_prefix = True
+        console.print(str(delta), end="", markup=False, highlight=False)
+        parts.append(str(delta))
+    if printed_prefix:
+        console.print()
+    return "".join(parts)
+
+
 @app.command()
 def chat() -> None:
     """与 Agent 对话（苏格拉底式深度交流）."""
@@ -16239,11 +16264,10 @@ def chat() -> None:
                 return
 
             try:
-                reply = asyncio.run(dialogue.respond(user_message))
+                asyncio.run(_stream_dialogue_reply(dialogue, user_message))
             except Exception as exc:
                 console.print(f"阿花：{safe_llm_failure_message(exc)}")
                 continue
-            console.print(f"阿花：{reply}")
     except KeyboardInterrupt:
         console.print("阿花：对话结束。")
 

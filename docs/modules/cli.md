@@ -1564,7 +1564,9 @@ openbiliclaw init
 
 ### `openbiliclaw chat`
 
-进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。CLI 构造点显式固定为
+进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。回复经 `respond_stream()` 逐 token
+流式打印（`阿花：` 前缀只出一次，增量不解析 markup、不换行刷屏）；service 无流式能力时
+回退一次性输出。CLI 构造点显式固定为
 `legacy_direct`：得到回复后仍按既有 detached direct learning 学习，既不提交 API
 runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
 但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒

@@ -11,11 +11,11 @@ M6 交付任务中心（durable 后台任务 + 建议清单回报）；
 M7 交付 L2 审批门（hard_write 工具逐项审批 + 审计台账）；
 M8 交付桌面 Web 前端（`web/desktop/`）：agent loop 真流式过程展示
 （`assets/js/chat-agent-core.js` 桌面侧 SSE 解析与过程流渲染，503 回退旧
-假流式）、会话侧栏、skill 切换、审批卡与任务中心，详见
+`/api/chat/stream` 单跳流式）、会话侧栏、skill 切换、审批卡与任务中心，详见
 [desktop-web 模块](desktop-web.md)；
 M9 交付移动 Web（`web/js/views/chat.js`）与插件 popup（`extension/popup/`）
 两端前端：agent loop 真流式过程展示（`web/shared/agent-chat.js` 共享 SSE 解析
-与过程流渲染，503 回退旧假流式）、会话列表、skill 切换、审批卡与任务中心，
+与过程流渲染，503 回退旧单跳流式）、会话列表、skill 切换、审批卡与任务中心，
 详见 [extension 模块](extension.md)（桌面 Web 为 M8）。
 
 ## 已实现功能
@@ -26,7 +26,8 @@ M9 交付移动 Web（`web/js/views/chat.js`）与插件 popup（`extension/popu
 | M1 SOURCE_TOOLS 迁移 | ✅ | `agent/tools/source_tools.py` 是 create_source / list_sources / toggle_source 的唯一事实来源（JSON Schema + 权限级：list=read，create/toggle=hard_write）；`sources/tools.py` 保留 `SOURCE_TOOLS` 旧扁平结构与 `SourceToolDispatcher` 同步接口，委托同一组 handler |
 | M1 原生 function calling | ✅ | 见 [llm 模块](llm.md)：OpenAI 系 chat-completions flavor 原生 FC，其余 provider 走 prompt 模拟兜底 |
 | M1 多跳 AgentLoop | ✅ | `agent/loop.py`：`AgentLoop.run()` 异步生成器逐跳产出事件，默认 64 跳上限（`[agent]` 配置），超限后无工具收尾汇报 |
-| M2 SSE 流式接线 | ✅ | 新端点 `POST /api/chat/agent/stream` 真流式转发 `AgentEvent`；`SocraticDialogue.stream_agent_reply()` 复用 persona prompt / 历史 / 学习队列；loop 事件随 turn 落 `payload.agent_events`；旧 `/api/chat` 与 `/api/chat/stream`（假流式）保持共存 |
+| M2 SSE 流式接线 | ✅ | 新端点 `POST /api/chat/agent/stream` 真流式转发 `AgentEvent`；`SocraticDialogue.stream_agent_reply()` 复用 persona prompt / 历史 / 学习队列；loop 事件随 turn 落 `payload.agent_events`；旧 `/api/chat` 与 `/api/chat/stream` 保持共存 |
+| M2.5 token 级流式（issue #83） | ✅ | `LLMProvider.stream_complete()` / `stream_complete_with_tools()`（基类一次性回退，OpenAI 系 chat-completions flavor 真流式）→ `LLMService.stream_complete_with_native_tools()` / `stream_socratic_dialogue()` → `AgentLoop` 每跳产出 `delta` 事件（工具调用阶段内容同样逐 token 流出，该跳若带 tool_calls 则由 `thinking` 全文接管）→ SSE `delta` 事件（不落 `agent_events`）；`SocraticDialogue.respond_stream()` 让 legacy `/api/chat/stream` 与 CLI `chat` 也逐 token 输出；registry 流式链只在**首个 delta 之前**允许 fallback（已吐字后失败直接上抛，避免重复文本） |
 | M3 v1 工具集（14 个） | ✅ | 见下文「v1 标准工具集」：`AgentToolContext` + `build_agent_tool_registry()` 总装，read / soft_write / hard_write 三级权限，handler 全部防御性降级 |
 | M4 skill 加载与切换 | ✅ | `agent/skill.py`：`SkillDefinition` + `*/SKILL.md` 解析（手写 frontmatter 子集，无 YAML 依赖）+ `load_skill_catalog()`（内置 → `data/skills/` 覆盖，非法文件跳过记日志）；4 个内置 skill；`suggest_skill` 元工具 + 端点 skill 绑定，见下文「Skill 体系（M4）」 |
 | M6 任务中心（durable 后台任务） | ✅ | `agent/tasks.py`：`AgentTaskRunner` 在 `BackgroundTaskRegistry` 登记的 asyncio task 里跑**只读** AgentLoop（`filter_by_permission("read")` ∩ skill 白名单），事件逐步落 `agent_tasks.steps`；写动作只经 `propose_suggestion` 元工具产出结构化建议清单，完成后往来源会话写汇总消息；交互侧另有 `start_background_task` 元工具（同 suggest_skill 确认卡模式）。见下文「任务中心（M6）」 |
@@ -242,6 +243,7 @@ prompt = 基础 socratic 人设 ⊕ skill 人设 ⊕ 其他 skill 清单
 | `tool_call` | `type` / `step` / `tool_name` / `arguments` / `summary` | 一次工具调用；`summary` 是一行折叠摘要（如 `list_sources()`） |
 | `tool_result` | `type` / `step` / `tool_name` / `text` / `ok` / `truncated` | 工具执行结果（已按 `tool_result_max_chars` 截断）；`ok=false` 表示未知工具 / 参数校验失败 / handler 异常。hard_write 被拦截时该事件携带的是「已提交审批、等待批准」说明而非真实执行结果 |
 | `approval_request` | `type` / `step` / `approval_id` / `tool_name` / `arguments` / `summary` / `impact` | M7：hard_write 调用已登记为待批准动作（**未执行**），前端据此渲染审批卡（做什么 = `summary`+`arguments`，影响 = `impact`），用户批准后调 `POST /api/chat/approvals/{approval_id}/approve` |
+| `delta` | `type` / `step` / `text` | token 级增量片段（token streaming）：当前跳 assistant 文本的一个增量，供前端实时渲染；可能出现在任何跳（含最终跳）。中间跳的 delta 文本稍后由该跳的 `thinking` 全文事件接管，最终跳的 delta 由 `final` 全文接管——权威文本始终以 `thinking` / `final` 为准，旧客户端可安全忽略本事件。**不落库**（见下） |
 | `step_limit_reached` | `type` / `step` / `text` | 达到步数上限时发一次，**随后必跟一个 `final`**（无工具收尾汇报） |
 | `final` | `type` / `step` / `text` | 最终答复，每个 run 恰好一个；发完后流进入收尾 |
 | `done` | `reply` / `turn_id` / `skill` | 终端事件（端点级，非 loop 事件）；`reply` 即 `final.text`，`skill` 是本回合实际生效的 skill 名 |
@@ -250,7 +252,9 @@ prompt = 基础 socratic 人设 ⊕ skill 人设 ⊕ 其他 skill 清单
 `step` 从 1 开始编号。turn 落库时关键步骤（含 thinking / tool_call /
 tool_result / approval_request / step_limit_reached / final）以相同 dict 结构写入
 `chat_turns.payload.agent_events`（JSON 数组，免迁移），历史回放直接读
-`GET /api/chat/turns/{turn_id}` 的 `payload.agent_events`。
+`GET /api/chat/turns/{turn_id}` 的 `payload.agent_events`；`delta` 事件只服务
+实时渲染，**不写入** `agent_events`（避免每轮数百条片段撑大 turn 行），回放文本
+由 `thinking` / `final` 全文重建。
 streaming turn 创建时服务端在 payload 写入 `agent_stream`（+ 可选 `agent_skill`）
 标记（属客户端不可伪造的保留键）：交互流断连后由 durable 兜底 worker
 完成的这类 turn 会**重跑同一多跳 loop**（同 skill、同工具子集）并把事件流
