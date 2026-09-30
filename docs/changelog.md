@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：推荐进程 TCP 端口占用冲突无探测（2026-09-30，fix/recommendation-port-probe）
+
+- **回退 TCP 时递增探测空闲端口（现场故障后续）**：上一修复把超长 Unix socket 路径回退到固定 `127.0.0.1:8423`，但同机第二个实例同样回退（或 8423 被别的程序占用）时子进程 bind 失败，又回到 `Recommendation proxy failed: All connection attempts failed`。现 `recommendation_runtime.find_free_loopback_port()` 从基准端口（显式 `OPENBILICLAW_RECOMMENDATION_PORT` 或 8423）起逐个真实 bind 探测，被占递增、有界 21 个候选，最终选中端口写回 env，父进程反代与子进程读同一变量天然一致；Windows 主路径（本就走 TCP）同样受益。**显式端口语义**：被占时同样递增而非硬失败，并记 WARNING 说明原值与改选结果——该端口是纯内部 loopback IPC，唯一消费者是读同一 env 的自家反代，硬失败只会复现推荐页 502；非法端口值 WARNING 后按默认端口探测。探测耗尽保留基准端口并 WARNING，子进程新增 `_run_tcp` 在 bind 失败时记含端口号的清晰 ERROR（覆盖探测到 bind 之间的小概率竞态）。独立运行 `recommendation_server` 的超长路径兜底分支同样先探测。回归：`tests/test_recommendation_runtime.py` +8 条（探测跳过被占端口且选中端口可绑、有界扫描耗尽返回 None、默认端口被占时 TCP 分支递增且 env 一致、显式端口被占递增 + WARNING 语义、耗尽保留基准 + WARNING、超长路径回退也探测、子进程 bind 失败 ERROR 日志、独立运行回退探测）。
+- **文档同步**：`docs/modules/cli.md`（start 传输选择段补端口探测与显式端口语义）、`docs/modules/api.md`（反代传输说明补端口探测）。
+
 ## 修复：桌面 web e2e 稳定性（2026-09-30，fix/e2e-stability）
 
 - **pool_refill 稳定性 e2e 按真实线上事件格式注入（测试过期，非产品 bug）**：`tests/test_desktop_web_list_stability_e2e.py::test_pool_refill_event_keeps_loaded_cards_and_scroll_position` 在干净 main 上稳定红，末条断言 `#metricPool == "70"` 不成立（实为 40）。根因：自 `408de9a8` 起头部库存只跟随带 `pool_status_version` 的已提交库存快照（`normalizeRuntimeStatus` 优先 `state.platformAvailability.total_available`，无版本事件的裸 `pool_available_count` 不再驱动头部），而测试注入的 `refresh.pool_updated` 缺 `pool_status_version` / `platform_available_counts`。产品行为正确（防 HTTP/WebSocket 竞态下旧快照覆盖新快照），故按真实后端 `_broadcast_recommendation_pool_status` 的线上格式补全注入字段，断言与 DOM 原地存活 / 滚动位置契约保持不变。
