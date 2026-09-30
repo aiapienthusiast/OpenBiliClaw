@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,7 @@ from openbiliclaw.recommendation_runtime import (
     RECOMMENDATION_SOCK_ENV,
     UNIX_SOCKET_SUN_PATH_BYTES,
     ensure_recommendation_transport_env,
+    find_free_loopback_port,
     recommendation_sock_from_data_path,
     recommendation_transport_enabled,
     unix_socket_path_too_long,
@@ -22,6 +24,13 @@ from openbiliclaw.recommendation_runtime import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _hold_loopback_port(port: int = 0) -> socket.socket:
+    """Bind and hold a 127.0.0.1 port so probes see it as occupied."""
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", port))
+    return held
 
 
 def _deep_data_path(tmp_path: Path) -> Path:
@@ -260,3 +269,155 @@ def test_recommendation_server_standalone_long_path_binds_tcp(monkeypatch, tmp_p
             "log_level": "info",
         }
     ]
+
+
+def test_find_free_loopback_port_skips_occupied() -> None:
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        port = find_free_loopback_port(base)
+
+    assert port is not None
+    assert port > base
+    with _hold_loopback_port(port):
+        pass
+
+
+def test_find_free_loopback_port_bounded_scan_exhausted() -> None:
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        assert find_free_loopback_port(base, max_attempts=1) is None
+
+
+def test_ensure_tcp_branch_probes_past_occupied_default_port(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv(RECOMMENDATION_SOCK_ENV, raising=False)
+    monkeypatch.delenv(RECOMMENDATION_PORT_ENV, raising=False)
+    monkeypatch.setattr(recommendation_runtime.os, "name", "nt")
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        monkeypatch.setattr(recommendation_runtime, "DEFAULT_RECOMMENDATION_PORT", base)
+
+        description = ensure_recommendation_transport_env(tmp_path)
+
+    port = int(recommendation_runtime.os.environ[RECOMMENDATION_PORT_ENV])
+    assert port > base
+    assert description == f"TCP 127.0.0.1:{port}"
+    assert RECOMMENDATION_SOCK_ENV not in recommendation_runtime.os.environ
+
+
+def test_ensure_tcp_branch_explicit_occupied_port_increments_with_warning(
+    monkeypatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An explicit port is internal loopback IPC, so an occupied one is
+    incremented (with a WARNING) instead of hard-failing the child."""
+    monkeypatch.delenv(RECOMMENDATION_SOCK_ENV, raising=False)
+    monkeypatch.setattr(recommendation_runtime.os, "name", "posix")
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        monkeypatch.setenv(RECOMMENDATION_PORT_ENV, str(base))
+
+        with caplog.at_level(logging.WARNING, logger="openbiliclaw.recommendation_runtime"):
+            description = ensure_recommendation_transport_env(tmp_path)
+
+    port = int(recommendation_runtime.os.environ[RECOMMENDATION_PORT_ENV])
+    assert port > base
+    assert description == f"TCP 127.0.0.1:{port}"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(base) in message and str(port) in message for message in warnings)
+    assert any("occupied" in message for message in warnings)
+
+
+def test_ensure_tcp_branch_probe_exhausted_keeps_base_with_warning(
+    monkeypatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv(RECOMMENDATION_SOCK_ENV, raising=False)
+    monkeypatch.setattr(recommendation_runtime.os, "name", "posix")
+    monkeypatch.setattr(recommendation_runtime, "RECOMMENDATION_PORT_SCAN_ATTEMPTS", 1)
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        monkeypatch.setenv(RECOMMENDATION_PORT_ENV, str(base))
+
+        with caplog.at_level(logging.WARNING, logger="openbiliclaw.recommendation_runtime"):
+            description = ensure_recommendation_transport_env(tmp_path)
+
+    assert recommendation_runtime.os.environ[RECOMMENDATION_PORT_ENV] == str(base)
+    assert description == f"TCP 127.0.0.1:{base}"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("No free loopback port" in message for message in warnings)
+
+
+def test_ensure_long_path_fallback_probes_past_occupied_default_port(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(RECOMMENDATION_SOCK_ENV, raising=False)
+    monkeypatch.delenv(RECOMMENDATION_PORT_ENV, raising=False)
+    monkeypatch.setattr(recommendation_runtime.os, "name", "posix")
+    deep_data_path = _deep_data_path(tmp_path)
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        monkeypatch.setattr(recommendation_runtime, "DEFAULT_RECOMMENDATION_PORT", base)
+
+        description = ensure_recommendation_transport_env(deep_data_path)
+
+    port = int(recommendation_runtime.os.environ[RECOMMENDATION_PORT_ENV])
+    assert port > base
+    assert description == f"TCP 127.0.0.1:{port}"
+
+
+def test_recommendation_server_tcp_bind_failure_logs_clear_error(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import openbiliclaw.recommendation_server as recommendation_server
+
+    monkeypatch.setattr(recommendation_server, "wait_for_buildable_llm", lambda: None)
+    monkeypatch.setattr(recommendation_server, "create_app", lambda: object())
+    monkeypatch.setattr(
+        recommendation_server.uvicorn,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(48, "Address already in use")),
+    )
+    monkeypatch.setenv(RECOMMENDATION_PORT_ENV, "18425")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="openbiliclaw.recommendation_server"),
+        pytest.raises(OSError),
+    ):
+        recommendation_server.main()
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("failed to bind" in message and "18425" in message for message in errors)
+
+
+@pytest.mark.skipif(recommendation_runtime.os.name == "nt", reason="POSIX Unix socket path")
+def test_recommendation_server_standalone_fallback_probes_occupied_default_port(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import openbiliclaw.recommendation_server as recommendation_server
+
+    calls: list[dict[str, object]] = []
+    fake_app = object()
+    deep_data_path = _deep_data_path(tmp_path)
+    monkeypatch.setattr(recommendation_server, "wait_for_buildable_llm", lambda: None)
+    monkeypatch.setattr(recommendation_server, "create_app", lambda: fake_app)
+    monkeypatch.setattr(
+        recommendation_server,
+        "load_config",
+        lambda: SimpleNamespace(data_path=deep_data_path),
+    )
+    monkeypatch.setattr(
+        recommendation_server.uvicorn,
+        "run",
+        lambda *args, **kwargs: calls.append({"app": args[0], **kwargs}),
+    )
+    monkeypatch.delenv(RECOMMENDATION_SOCK_ENV, raising=False)
+    monkeypatch.delenv(RECOMMENDATION_PORT_ENV, raising=False)
+    with _hold_loopback_port() as held:
+        base = held.getsockname()[1]
+        monkeypatch.setattr(recommendation_server, "DEFAULT_RECOMMENDATION_PORT", base)
+
+        recommendation_server.main()
+
+    assert len(calls) == 1
+    assert calls[0]["app"] is fake_app
+    assert calls[0]["host"] == "127.0.0.1"
+    assert isinstance(calls[0]["port"], int)
+    assert calls[0]["port"] > base

@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：推荐进程 TCP 端口占用冲突无探测（2026-09-30，fix/recommendation-port-probe）
+
+- **回退 TCP 时递增探测空闲端口（现场故障后续）**：上一修复把超长 Unix socket 路径回退到固定 `127.0.0.1:8423`，但同机第二个实例同样回退（或 8423 被别的程序占用）时子进程 bind 失败，又回到 `Recommendation proxy failed: All connection attempts failed`。现 `recommendation_runtime.find_free_loopback_port()` 从基准端口（显式 `OPENBILICLAW_RECOMMENDATION_PORT` 或 8423）起逐个真实 bind 探测，被占递增、有界 21 个候选，最终选中端口写回 env，父进程反代与子进程读同一变量天然一致；Windows 主路径（本就走 TCP）同样受益。**显式端口语义**：被占时同样递增而非硬失败，并记 WARNING 说明原值与改选结果——该端口是纯内部 loopback IPC，唯一消费者是读同一 env 的自家反代，硬失败只会复现推荐页 502；非法端口值 WARNING 后按默认端口探测。探测耗尽保留基准端口并 WARNING，子进程新增 `_run_tcp` 在 bind 失败时记含端口号的清晰 ERROR（覆盖探测到 bind 之间的小概率竞态）。独立运行 `recommendation_server` 的超长路径兜底分支同样先探测。回归：`tests/test_recommendation_runtime.py` +8 条（探测跳过被占端口且选中端口可绑、有界扫描耗尽返回 None、默认端口被占时 TCP 分支递增且 env 一致、显式端口被占递增 + WARNING 语义、耗尽保留基准 + WARNING、超长路径回退也探测、子进程 bind 失败 ERROR 日志、独立运行回退探测）。
+- **文档同步**：`docs/modules/cli.md`（start 传输选择段补端口探测与显式端口语义）、`docs/modules/api.md`（反代传输说明补端口探测）。
+
 ## 修复：Responses API flavor 缺 length 截断自愈（2026-09-30，fix/responses-length-retry）
 
 - **Responses 路径补齐预算放大重试（chat 修复的 flavor 补齐）**：`c36cff5a` 给 chat-completions 路径加的 `finish_reason=length` 翻倍预算重试未覆盖 `api_flavor="responses"` 实例——Responses 端点以 `status="incomplete"` + `incomplete_details.reason="max_output_tokens"` 表达输出截断，此前只在空 `content` 时用**相同预算**去掉 `text.format` 重试，reasoning 模型会再次把预算烧在思考上。现 `_complete_via_responses()` 获得等价自愈：① json_mode 下 JSON 被截断但有正文时翻倍 `max_output_tokens` 重试一次；② 空 `content` 走完「去 text.format」重试梯后仍是 `incomplete/max_output_tokens` 时翻倍重试一次。既有 `_chat_retry_with_larger_budget()` 泛化为共享的 `_retry_with_larger_budget()`（预算键 / 截断标记 / 发送函数参数化，封顶逻辑单一出处），新增 `_responses_output_truncated()` 判定，封顶同为 32768、已达上限不重试、重试保留其余请求参数、仍失败时抛与此前一致的 `returned empty content` 错误，下游回退行为不变。回归：`tests/test_llm_providers.py` +4 条（截断 JSON 放大重试成功且参数保留、空 content 梯后放大重试成功、重试耗尽错误与回退不变、已达封顶不重试）。
