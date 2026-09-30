@@ -2064,7 +2064,12 @@ def test_claude_provider_defaults_to_official_base_url() -> None:
     assert "api.anthropic.com" in str(provider._client.base_url)
 
 
-def _responses_response(text: str = "ok", *, with_output_text: bool = True) -> SimpleNamespace:
+def _responses_response(
+    text: str = "ok",
+    *,
+    with_output_text: bool = True,
+    truncated: bool = False,
+) -> SimpleNamespace:
     response = SimpleNamespace(
         model="gpt-5-mini",
         output=[
@@ -2082,6 +2087,10 @@ def _responses_response(text: str = "ok", *, with_output_text: bool = True) -> S
     )
     if with_output_text:
         response.output_text = text
+    if truncated:
+        # How the Responses API reports output-token truncation on the wire.
+        response.status = "incomplete"
+        response.incomplete_details = SimpleNamespace(reason="max_output_tokens")
     return response
 
 
@@ -2218,6 +2227,131 @@ async def test_openai_provider_responses_flavor_retries_without_format_on_empty(
     assert response.content == '{"ok": true}'
     assert "text" in calls[0]
     assert "text" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_retries_incomplete_json_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON payload cut off mid-stream (status=incomplete with
+    incomplete_details.reason=max_output_tokens) is retried once with a
+    doubled ``max_output_tokens`` instead of being handed to the parser
+    truncated."""
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="gpt-5-mini",
+        base_url="https://relay.example.com/v1",
+        provider_name="openai_compatible",
+        api_flavor="responses",
+        reasoning_effort="low",
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            return _responses_response('{"keywords":["并发', truncated=True)
+        return _responses_response('{"keywords":["并发控制"]}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete(
+        [{"role": "user", "content": "return json"}],
+        json_mode=True,
+        max_tokens=512,
+    )
+
+    assert response.content == '{"keywords":["并发控制"]}'
+    assert len(calls) == 2
+    assert calls[0]["max_output_tokens"] == 512
+    assert calls[1]["max_output_tokens"] == 1024
+    # The retry keeps every other request parameter intact.
+    assert calls[1]["text"] == {"format": {"type": "json_object"}}
+    assert calls[1]["reasoning"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_retries_empty_incomplete_with_larger_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty content that stays ``incomplete/max_output_tokens`` after the
+    no-format retry gets one doubled-budget retry — the reasoning model spent
+    the whole output budget on thinking."""
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        if len(calls) < 3:
+            return _responses_response("", truncated=True)
+        return _responses_response('{"ok": true}')
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    response = await provider.complete(
+        [{"role": "user", "content": "return json"}],
+        json_mode=True,
+        max_tokens=512,
+    )
+
+    assert response.content == '{"ok": true}'
+    assert len(calls) == 3
+    # Ladder: original ask → empty-content retry without text.format →
+    # truncation retry with a doubled budget.
+    assert "text" not in calls[1]
+    assert calls[1]["max_output_tokens"] == 512
+    assert calls[2]["max_output_tokens"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_raises_empty_error_when_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When even the doubled budget comes back incomplete and empty, the
+    original empty-content error (and downstream fallback) is unchanged."""
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return _responses_response("", truncated=True)
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        await provider.complete(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=512,
+        )
+
+    assert "returned empty content" in str(exc_info.value)
+    assert len(calls) == 2
+    assert calls[-1]["max_output_tokens"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_responses_flavor_skips_length_retry_when_budget_at_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At or above the retry cap a retry would resend the same request, so the
+    call fails directly on the empty-content error."""
+    provider = OpenAIProvider(api_key="test-key", api_flavor="responses")
+    calls: list[dict[str, object]] = []
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return _responses_response("", truncated=True)
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        await provider.complete(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=32768,
+        )
+
+    assert "returned empty content" in str(exc_info.value)
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

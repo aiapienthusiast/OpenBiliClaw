@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：Responses API flavor 缺 length 截断自愈（2026-09-30，fix/responses-length-retry）
+
+- **Responses 路径补齐预算放大重试（chat 修复的 flavor 补齐）**：`c36cff5a` 给 chat-completions 路径加的 `finish_reason=length` 翻倍预算重试未覆盖 `api_flavor="responses"` 实例——Responses 端点以 `status="incomplete"` + `incomplete_details.reason="max_output_tokens"` 表达输出截断，此前只在空 `content` 时用**相同预算**去掉 `text.format` 重试，reasoning 模型会再次把预算烧在思考上。现 `_complete_via_responses()` 获得等价自愈：① json_mode 下 JSON 被截断但有正文时翻倍 `max_output_tokens` 重试一次；② 空 `content` 走完「去 text.format」重试梯后仍是 `incomplete/max_output_tokens` 时翻倍重试一次。既有 `_chat_retry_with_larger_budget()` 泛化为共享的 `_retry_with_larger_budget()`（预算键 / 截断标记 / 发送函数参数化，封顶逻辑单一出处），新增 `_responses_output_truncated()` 判定，封顶同为 32768、已达上限不重试、重试保留其余请求参数、仍失败时抛与此前一致的 `returned empty content` 错误，下游回退行为不变。回归：`tests/test_llm_providers.py` +4 条（截断 JSON 放大重试成功且参数保留、空 content 梯后放大重试成功、重试耗尽错误与回退不变、已达封顶不重试）。
+- **文档同步**：`docs/modules/llm.md`（「finish_reason=length 预算放大重试」行扩为两条 flavor）。
+
 ## 修复：桌面 web e2e 稳定性（2026-09-30，fix/e2e-stability）
 
 - **pool_refill 稳定性 e2e 按真实线上事件格式注入（测试过期，非产品 bug）**：`tests/test_desktop_web_list_stability_e2e.py::test_pool_refill_event_keeps_loaded_cards_and_scroll_position` 在干净 main 上稳定红，末条断言 `#metricPool == "70"` 不成立（实为 40）。根因：自 `408de9a8` 起头部库存只跟随带 `pool_status_version` 的已提交库存快照（`normalizeRuntimeStatus` 优先 `state.platformAvailability.total_available`，无版本事件的裸 `pool_available_count` 不再驱动头部），而测试注入的 `refresh.pool_updated` 缺 `pool_status_version` / `platform_available_counts`。产品行为正确（防 HTTP/WebSocket 竞态下旧快照覆盖新快照），故按真实后端 `_broadcast_recommendation_pool_status` 的线上格式补全注入字段，断言与 DOM 原地存活 / 滚动位置契约保持不变。
