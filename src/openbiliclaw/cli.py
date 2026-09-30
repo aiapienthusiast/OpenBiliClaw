@@ -16224,17 +16224,33 @@ def chat() -> None:
         raise typer.Exit(code=1) from exc
 
     dialogue = _build_dialogue(soul_engine)
-    _print_page_title("苏格拉底式对话", "输入 exit / quit / 空行结束")
+    from openbiliclaw.cli_input import (
+        MULTILINE_HINT,
+        build_multiline_session,
+        is_chat_exit_command,
+        supports_multiline_prompt,
+    )
+
+    multiline_session = (
+        build_multiline_session() if supports_multiline_prompt(sys.stdin, sys.stdout) else None
+    )
+    subtitle = "输入 exit / quit / 空行结束"
+    if multiline_session is not None:
+        subtitle += f"；{MULTILINE_HINT}"
+    _print_page_title("苏格拉底式对话", subtitle)
 
     try:
         while True:
             try:
-                user_message = typer.prompt("你", prompt_suffix="： ").strip()
+                if multiline_session is not None:
+                    user_message = multiline_session.prompt("你： ").strip()
+                else:
+                    user_message = typer.prompt("你", prompt_suffix="： ").strip()
             except (click.Abort, EOFError, KeyboardInterrupt):
                 console.print("阿花：对话结束。")
                 return
 
-            if user_message.lower() in {"", "exit", "quit"}:
+            if is_chat_exit_command(user_message):
                 console.print("阿花：对话结束。")
                 return
 

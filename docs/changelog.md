@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 新增：CLI chat 支持多行输入（2026-09-30，feat/cli-multiline-input，issue #83）
+
+- **多行输入（核心）**：用户反馈「求能换行」，此前 `openbiliclaw chat` 用 `typer.prompt` 单行读取，与 Web 端（Shift+Enter 换行）体验不一致。现交互式终端（stdin/stdout 均为 TTY）下输入框改由 prompt_toolkit `PromptSession` 驱动：Enter 发送，Esc+Enter（或 Alt+Enter，终端中即 Meta+Enter）插入换行，进入对话时副标题提示快捷键；非 TTY 环境（管道、重定向、自动化测试）自动回退原单行 `typer.prompt`，退出命令（exit / quit / 空行）、Ctrl+C/Ctrl+D 终止、单轮失败续聊等行为不变。可测逻辑抽到 `openbiliclaw.cli_input`：`supports_multiline_prompt()`（TTY 判定）、`is_chat_exit_command()`（退出判定）、`build_multiline_key_bindings()` / `build_multiline_session()`（会话构造）。新增依赖 `prompt_toolkit>=3.0`（输入交互能力此前全库缺失，无既有依赖可复用）。回归：`tests/test_cli_input.py` +6 条（TTY 判定双真才启用、退出命令大小写/空白/多行不误判、multiline buffer 与 Enter / Esc+Enter 键绑定注册、快捷键提示文案）。
+- **文档同步**：`docs/modules/cli.md`（`chat` 小节补多行输入与回退规则）。
+
 ## 修复：文案/评估协调器退避静默 + runtime-status 恒显 idle（2026-09-30，fix/expression-copy-backoff-observability）
 
 - **退避可观测（核心）**：真实环境 e2e 发现 discovery worker 里的 `ExpressionCopyCoordinator` 在 provider 429 后进入 15/30/60/120/300s transient backoff，期间**零日志**——表现为「19 条待写文案 10 分钟无进展、无任何日志」。现按 candidate_eval 的 worker failed 风格补齐状态迁移日志：transient 退避（WARNING 含退避时长/pending/streak/失败摘要）、no_provider/auth_failed 暂停、零进展 15s 重试、退避后恢复（INFO）、config_*/manual_*/startup 唤醒恢复（INFO）各一条，干净 drain 不刷日志。`CandidateEvalCoordinator` 同类静默分支一并补齐：rate-limit 退避（此前只有 transient 有日志）、no_provider/auth_failed 暂停、退避后 recovered、唤醒 resumed。回归：`tests/test_expression_copy_coordinator.py` +4 条（退避 WARNING 含时长/pending/原因、恢复 INFO、零进展 WARNING、干净 drain 无 WARNING、暂停/恢复日志）、`tests/test_candidate_eval_coordinator.py` +1 条。
