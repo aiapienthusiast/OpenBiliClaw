@@ -2,6 +2,11 @@
 
 > 按里程碑记录各阶段交付内容。每次分支合回 main 时追加条目。
 
+## 修复：桌面 web e2e 稳定性（2026-09-30，fix/e2e-stability）
+
+- **pool_refill 稳定性 e2e 按真实线上事件格式注入（测试过期，非产品 bug）**：`tests/test_desktop_web_list_stability_e2e.py::test_pool_refill_event_keeps_loaded_cards_and_scroll_position` 在干净 main 上稳定红，末条断言 `#metricPool == "70"` 不成立（实为 40）。根因：自 `408de9a8` 起头部库存只跟随带 `pool_status_version` 的已提交库存快照（`normalizeRuntimeStatus` 优先 `state.platformAvailability.total_available`，无版本事件的裸 `pool_available_count` 不再驱动头部），而测试注入的 `refresh.pool_updated` 缺 `pool_status_version` / `platform_available_counts`。产品行为正确（防 HTTP/WebSocket 竞态下旧快照覆盖新快照），故按真实后端 `_broadcast_recommendation_pool_status` 的线上格式补全注入字段，断言与 DOM 原地存活 / 滚动位置契约保持不变。
+- **dialogue 布局 e2e 滚轮 flake 改确定性等待**：`tests/test_desktop_dialogue_layout_e2e.py::test_many_dialogue_cards_keep_natural_height_and_scroll` 的 `mouse.wheel` 后固定 `wait_for_timeout(80)` 在并行负载下会早采样到 `scrollTop=0`（headless Chromium 滚轮滚动由合成器异步落地，实测延迟可超 80ms、随后正常到位），改为 `wait_for_function` 轮询到 `scrollTop` 真正前进再断言，连跑 5 遍全绿。
+
 ## 修复：数据目录过深时推荐子进程 AF_UNIX 路径超限崩溃（2026-09-30，fix/recommendation-socket-fallback）
 
 - **Unix socket 路径超限自动回退 TCP（现场故障）**：推荐子进程与主 API 之间的 Unix socket 路径由 `<data_dir>/runtime/recommendation.sock` 直接拼接，macOS 上 `sun_path` 上限约 104 字节，数据目录稍深子进程启动即以 `OSError: AF_UNIX path too long` 崩溃，API 侧随后报 `Recommendation proxy failed: All connection attempts failed`（生产日志 2026-09-28 出现 4 次）。现 `recommendation_runtime.ensure_recommendation_transport_env()` 在选 Unix socket 前对最终路径（含显式 `OPENBILICLAW_RECOMMENDATION_SOCK`）做字节长度检查，达到 104 字节（含 NUL，按最严 POSIX 平台计）即自动回退 loopback TCP（默认 `127.0.0.1:8423`）并记一条 WARNING（含实际路径长度与所选端口）；传输仍由父进程环境变量单一决定，子进程与 API 反代读同一组变量，双方始终一致。独立直接运行 `openbiliclaw.recommendation_server`（无继承环境变量）时同样的长度检查在进程内兜底，不再崩溃。Windows 行为不变（本就走 TCP）。回归：`tests/test_recommendation_runtime.py` +5 条（长度边界、超长派生路径回退 TCP 且 WARNING 含长度/上限/端口、超长显式 SOCK 回退、ensure 与 server 经共享 env 同选 TCP、server 独立运行超长路径兜底 TCP）。
